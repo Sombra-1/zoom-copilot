@@ -1,4 +1,7 @@
 # Zoom Co-Pilot
+Beta — still being tested, bugs may exist. If you find one, please open an issue and I'll fix it.
+
+
 
 Real-time AI assistant for Zoom, Teams, and Google Meet.
 Listens to your meeting audio, transcribes it, and gives you AI-generated replies — all in a floating overlay that's invisible to screen share.
