@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# Runtime files
+setup_log.txt
+.copilot_settings.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE / AI tools
+.claude/
+CLAUDE.md
+.copilot*
