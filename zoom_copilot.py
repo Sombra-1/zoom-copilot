@@ -1860,10 +1860,11 @@ class SetupScreen(tk.Frame):
             value=self.s.get("local_whisper_model", "base"))
         self._model_row_widgets = {}
 
-        for m in LOCAL_WHISPER_MODELS:
+        for i, m in enumerate(LOCAL_WHISPER_MODELS):
+            if i > 0:
+                tk.Frame(parent, bg=C["border"], height=1).pack(fill="x")
             row = tk.Frame(parent, bg=C["bg"], pady=3)
             row.pack(fill="x")
-            tk.Frame(parent, bg=C["border"], height=1).pack(fill="x")
 
             rb = tk.Radiobutton(row, variable=self._vars["local_whisper_model"], value=m,
                 bg=C["bg"], fg=C["accent"], selectcolor=C["panel2"],
@@ -1967,12 +1968,18 @@ class SetupScreen(tk.Frame):
                 f"Delete the '{model_name}' model files from disk?\n"
                 "This frees space but requires re-downloading before next use."):
             return
-        try:
-            delete_whisper_model(model_name)
-        except Exception as e:
-            messagebox.showerror("Delete failed", str(e))
-            return
-        self._check_local_whisper_status()
+        lbl, inst_btn, del_btn = self._model_row_widgets[model_name]
+        del_btn.config(state="disabled")
+        lbl.config(text="Deleting…", fg=C["warn"])
+
+        def run():
+            try:
+                delete_whisper_model(model_name)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("Delete failed", str(e)))
+            self.after(0, self._check_local_whisper_status)
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _collect(self):
         s = dict(self.s)
