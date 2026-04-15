@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 title Zoom Co-Pilot — Setup
 
 :: ── Self-elevate to admin (VB-Cable driver needs it) ────────────────────────
@@ -65,14 +66,24 @@ echo.
 
 :: ── Step 3: Python packages ───────────────────────────────────────────────────
 echo  [3/4] Installing Python packages...
-echo        (sounddevice, numpy, requests — small and fast)
+echo        Core: sounddevice, numpy, requests
 "%VENV%\Scripts\pip.exe" install sounddevice numpy requests -q >> "%LOG%" 2>&1
 if errorlevel 1 (
-    echo  [ERROR] Package install failed. See setup_log.txt
+    echo  [ERROR] Core package install failed. See setup_log.txt
     pause
     exit /b 1
 )
-echo        Done.
+echo        Core packages done.
+
+echo        Optional: mss, Pillow, pystray  (screen watch + system tray)
+"%VENV%\Scripts\pip.exe" install mss Pillow pystray -q >> "%LOG%" 2>&1
+if errorlevel 1 (
+    echo        [WARN] Optional packages failed — screen watch and system tray won't work.
+    echo               You can install them later:  pip install mss Pillow pystray
+    echo               Core app will still work fine.
+) else (
+    echo        Optional packages done.
+)
 echo.
 
 :: ── Step 4: VB-Cable virtual audio driver ─────────────────────────────────────

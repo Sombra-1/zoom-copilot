@@ -65,7 +65,10 @@ def check_vbcable():
     try:
         import sounddevice as sd
         for d in sd.query_devices():
-            if "cable" in d["name"].lower() and d["max_input_channels"] > 0:
+            name = d["name"].lower()
+            # Match "cable output" specifically — avoids false positives from
+            # other devices that happen to have "cable" in their name
+            if ("cable output" in name or "vb-cable" in name) and d["max_input_channels"] > 0:
                 return True
     except Exception:
         pass
@@ -104,7 +107,7 @@ class SetupApp:
         self.root = tk.Tk()
         self.root.title("Zoom Co-Pilot — Setup")
         self.root.configure(bg=C["bg"])
-        self.root.geometry("480x560+120+80")
+        self.root.geometry("480x700+120+80")
         self.root.resizable(False, False)
         self.root.attributes("-topmost", True)
 
@@ -134,6 +137,9 @@ class SetupApp:
             ("sounddevice", "sounddevice  (audio capture)"),
             ("numpy",       "numpy  (audio processing)"),
             ("requests",    "requests  (AI backends)"),
+            ("mss",         "mss  (screen watch — optional)"),
+            ("PIL",         "Pillow  (screen watch + tray — optional)"),
+            ("pystray",     "pystray  (system tray — optional)"),
         ]
         if sys.platform == "win32":
             checks.append(("vbcable", "VB-Cable  (captures Zoom audio)"))
@@ -323,6 +329,63 @@ class SetupApp:
                 self._log(f"✗ requests install failed: {e}")
                 results["requests"] = False
 
+        # mss (optional — screen watch)
+        self._set_row("mss", "working", "checking…")
+        if check_package("mss"):
+            self._set_row("mss", "ok", "installed")
+            self._log("✓ mss")
+            results["mss"] = True
+        else:
+            self._set_row("mss", "working", "installing…")
+            self._log("→ Installing mss (optional)…")
+            try:
+                pip_install("mss")
+                self._set_row("mss", "ok", "installed")
+                self._log("✓ mss installed")
+                results["mss"] = True
+            except Exception as e:
+                self._set_row("mss", "warn", "optional — not installed")
+                self._log(f"⚠ mss not installed (screen watch unavailable): {e}")
+                results["mss"] = None  # None = optional miss, not a blocker
+
+        # Pillow (optional — screen watch + tray)
+        self._set_row("PIL", "working", "checking…")
+        if check_package("PIL"):
+            self._set_row("PIL", "ok", "installed")
+            self._log("✓ Pillow")
+            results["PIL"] = True
+        else:
+            self._set_row("PIL", "working", "installing…")
+            self._log("→ Installing Pillow (optional)…")
+            try:
+                pip_install("Pillow")
+                self._set_row("PIL", "ok", "installed")
+                self._log("✓ Pillow installed")
+                results["PIL"] = True
+            except Exception as e:
+                self._set_row("PIL", "warn", "optional — not installed")
+                self._log(f"⚠ Pillow not installed (screen watch/tray unavailable): {e}")
+                results["PIL"] = None
+
+        # pystray (optional — system tray)
+        self._set_row("pystray", "working", "checking…")
+        if check_package("pystray"):
+            self._set_row("pystray", "ok", "installed")
+            self._log("✓ pystray")
+            results["pystray"] = True
+        else:
+            self._set_row("pystray", "working", "installing…")
+            self._log("→ Installing pystray (optional)…")
+            try:
+                pip_install("pystray")
+                self._set_row("pystray", "ok", "installed")
+                self._log("✓ pystray installed")
+                results["pystray"] = True
+            except Exception as e:
+                self._set_row("pystray", "warn", "optional — not installed")
+                self._log(f"⚠ pystray not installed (system tray unavailable): {e}")
+                results["pystray"] = None
+
         # VB-Cable (Windows only)
         if sys.platform == "win32":
             self._set_row("vbcable", "working", "checking…")
@@ -342,8 +405,10 @@ class SetupApp:
         self._finish(results)
 
     def _finish(self, results):
-        # VB-Cable failure is a warning, not a blocker (app still works, just can't hear Zoom)
-        blockers = {k: v for k, v in results.items() if k != "vbcable" and not v}
+        # Optional packages (mss, PIL, pystray) use None to signal "optional miss"
+        # VB-Cable failure is also a warning, not a hard blocker
+        optional_keys = {"vbcable", "mss", "PIL", "pystray"}
+        blockers = {k: v for k, v in results.items() if k not in optional_keys and not v}
         vbcable_missing = sys.platform == "win32" and not results.get("vbcable", True)
 
         if not blockers:
