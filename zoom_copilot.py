@@ -806,6 +806,48 @@ LOCAL_WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v2"]
 
 _local_whisper_model_cache = {}   # model_name → loaded model instance
 
+
+# ── Whisper model cache management ───────────────────────────────────────────
+
+def _get_whisper_cache_dir():
+    """Return the HuggingFace hub cache directory (respects env overrides)."""
+    env = os.environ.get("HUGGINGFACE_HUB_CACHE") or os.environ.get("HF_HOME")
+    if env:
+        return env
+    return os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub")
+
+def is_whisper_model_downloaded(model_name):
+    """Return True if the faster-whisper model files are cached locally."""
+    folder = os.path.join(_get_whisper_cache_dir(),
+                          f"models--Systran--faster-whisper-{model_name}", "snapshots")
+    if not os.path.isdir(folder):
+        return False
+    try:
+        for snap in os.listdir(folder):
+            snap_path = os.path.join(folder, snap)
+            if os.path.isdir(snap_path) and os.listdir(snap_path):
+                return True
+    except OSError:
+        pass
+    return False
+
+def delete_whisper_model(model_name):
+    """Delete cached model files for model_name and evict it from the in-memory cache."""
+    import shutil
+    folder = os.path.join(_get_whisper_cache_dir(),
+                          f"models--Systran--faster-whisper-{model_name}")
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    _local_whisper_model_cache.pop(model_name, None)
+
+def download_whisper_model(model_name, progress_cb):
+    """Pre-download a faster-whisper model without transcribing anything."""
+    from faster_whisper import WhisperModel
+    progress_cb(f"Downloading {model_name}…")
+    model = WhisperModel(model_name, device="cpu", compute_type="int8")
+    _local_whisper_model_cache[model_name] = model
+
+
 def transcribe_local(audio_np, model_name="base", language="en"):
     """Transcribe using faster-whisper running locally — no internet needed."""
     from faster_whisper import WhisperModel
@@ -960,8 +1002,16 @@ def process_audio(audio_np, s, gui):
                                    s.get("language", "en"),
                                    s.get("whisper_model", "whisper-large-v3-turbo"))
     except Exception as e:
-        gui.append_message("ERROR", f"Transcription failed: {e}", "error")
-        gui.set_status("Listening...", C["accent"])
+        err_str = str(e)
+        if "403" in err_str or "Forbidden" in err_str:
+            gui.append_message("ERROR",
+                "Groq 403 — your region is blocked by Groq.\n"
+                "→ Fix: Settings → Section 03 → switch to  Local Whisper  (fully offline, no VPN needed).\n"
+                "Listening stopped.", "error")
+            gui.after(0, gui._stop)
+        else:
+            gui.append_message("ERROR", f"Transcription failed: {e}", "error")
+        gui.set_status("Error", C["error"])
         return
 
     if not text or len(text) < 4:
@@ -1308,41 +1358,10 @@ class SetupScreen(tk.Frame):
 
         tk.Label(self._local_tr_frame,
             text="Runs 100% offline — no API key, no internet, no VPN needed.\n"
-                 "First use downloads the model once (~40 MB for 'base').",
+                 "Select a model below and click  ⬇ Get  to pre-download it.",
             font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(0, 6))
 
-        # Local model size dropdown
-        lm_row = tk.Frame(self._local_tr_frame, bg=C["bg"])
-        lm_row.pack(fill="x", pady=4)
-        tk.Label(lm_row, text=f"{'Model size':<14}", font=MONO9, bg=C["bg"], fg=C["fg2"],
-                 width=14, anchor="w").pack(side="left")
-        self._vars["local_whisper_model"] = tk.StringVar(value=self.s.get("local_whisper_model", "base"))
-        lm_menu = tk.OptionMenu(lm_row, self._vars["local_whisper_model"], *LOCAL_WHISPER_MODELS)
-        lm_menu.config(font=MONO9, bg=C["input_bg"], fg=C["input_fg"],
-                       activebackground=C["panel"], activeforeground=C["accent"],
-                       relief="flat", bd=0, highlightthickness=1,
-                       highlightbackground=C["border"], highlightcolor=C["accent2"],
-                       cursor="hand2", padx=8, pady=4)
-        lm_menu["menu"].config(font=MONO9, bg=C["panel"], fg=C["fg"],
-                               activebackground=C["accent2"], activeforeground="#fff")
-        lm_menu.pack(side="left", fill="x", expand=True)
-        tk.Label(self._local_tr_frame,
-            text="  tiny=40MB  base=150MB  small=500MB  medium=1.5GB  large-v2=3GB",
-            font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(0, 6))
-
-        # Install button row
-        inst_row = tk.Frame(self._local_tr_frame, bg=C["bg"])
-        inst_row.pack(fill="x", pady=(0, 4))
-        self._fw_status = tk.Label(inst_row, text="", font=MONO8, bg=C["bg"], fg=C["fg2"])
-        self._fw_status.pack(side="left")
-        self._fw_btn = tk.Button(inst_row, text="⬇  Install faster-whisper",
-            font=MONO9, bg="#141414", fg=C["fg2"],
-            activebackground="#1e1e1e", activeforeground=C["fg"],
-            relief="flat", bd=0, cursor="hand2", padx=12, pady=6,
-            command=self._install_local_whisper)
-        self._fw_btn.pack(side="right")
-        _hover_btn(self._fw_btn, "#1e1e1e", C["fg"])
-        self._check_local_whisper_status()
+        self._build_whisper_model_table(self._local_tr_frame)
 
         # Language (shared by both)
         tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(8, 4))
@@ -1808,12 +1827,103 @@ class SetupScreen(tk.Frame):
         else:
             self._local_tr_frame.pack(fill="x")
 
+    def _build_whisper_model_table(self, parent):
+        """Per-model install / delete table for local Whisper."""
+        MODEL_SIZES = {
+            "tiny": "40 MB", "base": "150 MB", "small": "500 MB",
+            "medium": "1.5 GB", "large-v2": "3 GB",
+        }
+
+        # Package install row
+        pkg_row = tk.Frame(parent, bg=C["bg"])
+        pkg_row.pack(fill="x", pady=(0, 8))
+        self._fw_status = tk.Label(pkg_row, text="", font=MONO8, bg=C["bg"], fg=C["fg2"])
+        self._fw_status.pack(side="left")
+        self._fw_btn = tk.Button(pkg_row, text="⬇  Install faster-whisper",
+            font=MONO9, bg="#141414", fg=C["fg2"],
+            activebackground="#1e1e1e", activeforeground=C["fg"],
+            relief="flat", bd=0, cursor="hand2", padx=12, pady=6,
+            command=self._install_local_whisper)
+        self._fw_btn.pack(side="right")
+        _hover_btn(self._fw_btn, "#1e1e1e", C["fg"])
+
+        # Column headers
+        hdr = tk.Frame(parent, bg=C["panel2"], pady=4)
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="", width=2, bg=C["panel2"]).pack(side="left")
+        for txt, w in [("Model", 10), ("Size", 8), ("Status", 20)]:
+            tk.Label(hdr, text=txt, font=MONO8, bg=C["panel2"], fg=C["fg2"],
+                     width=w, anchor="w").pack(side="left")
+
+        # Per-model rows
+        self._vars["local_whisper_model"] = tk.StringVar(
+            value=self.s.get("local_whisper_model", "base"))
+        self._model_row_widgets = {}
+
+        for m in LOCAL_WHISPER_MODELS:
+            row = tk.Frame(parent, bg=C["bg"], pady=3)
+            row.pack(fill="x")
+            tk.Frame(parent, bg=C["border"], height=1).pack(fill="x")
+
+            rb = tk.Radiobutton(row, variable=self._vars["local_whisper_model"], value=m,
+                bg=C["bg"], fg=C["accent"], selectcolor=C["panel2"],
+                activebackground=C["bg"], activeforeground=C["accent"],
+                bd=0, highlightthickness=0, cursor="hand2")
+            rb.pack(side="left", padx=(4, 2))
+
+            tk.Label(row, text=m, font=MONO9, bg=C["bg"], fg=C["fg"],
+                     width=10, anchor="w").pack(side="left")
+            tk.Label(row, text=MODEL_SIZES.get(m, ""), font=MONO8, bg=C["bg"], fg=C["fg2"],
+                     width=8, anchor="w").pack(side="left")
+
+            status_lbl = tk.Label(row, text="—", font=MONO8, bg=C["bg"],
+                                  fg=C["fg2"], width=20, anchor="w")
+            status_lbl.pack(side="left")
+
+            del_btn = tk.Button(row, text="🗑 Delete",
+                font=MONO8, bg="#1a0808", fg=C["error"],
+                activebackground="#2a1010", activeforeground=C["error"],
+                relief="flat", bd=0, cursor="hand2", padx=8, pady=3,
+                command=lambda mn=m: self._delete_model(mn))
+            del_btn.pack(side="right", padx=(2, 4))
+            _hover_btn(del_btn, "#2a1010", C["error"])
+
+            inst_btn = tk.Button(row, text="⬇ Get",
+                font=MONO8, bg="#0a1a0a", fg=C["success"],
+                activebackground="#0f280f", activeforeground=C["success"],
+                relief="flat", bd=0, cursor="hand2", padx=10, pady=3,
+                command=lambda mn=m: self._download_model(mn))
+            inst_btn.pack(side="right", padx=(0, 2))
+            _hover_btn(inst_btn, "#0f280f", C["success"])
+
+            self._model_row_widgets[m] = (status_lbl, inst_btn, del_btn)
+
+        self._check_local_whisper_status()
+
     def _check_local_whisper_status(self):
-        if faster_whisper_installed():
+        installed = faster_whisper_installed()
+        if installed:
             self._fw_status.config(text="✓ faster-whisper installed", fg=C["success"])
             self._fw_btn.config(text="✓ Installed", state="disabled", fg=C["success"])
         else:
-            self._fw_status.config(text="Not installed", fg=C["fg2"])
+            self._fw_status.config(text="Not installed — click to install →", fg=C["fg2"])
+            self._fw_btn.config(text="⬇  Install faster-whisper", state="normal", fg=C["fg2"])
+
+        if not hasattr(self, "_model_row_widgets"):
+            return
+        for m, (lbl, inst_btn, del_btn) in self._model_row_widgets.items():
+            if not installed:
+                lbl.config(text="—", fg=C["fg2"])
+                inst_btn.config(state="disabled")
+                del_btn.config(state="disabled")
+            elif is_whisper_model_downloaded(m):
+                lbl.config(text="✓ Ready", fg=C["success"])
+                inst_btn.config(state="disabled", fg=C["fg2"])
+                del_btn.config(state="normal")
+            else:
+                lbl.config(text="Not downloaded", fg=C["fg2"])
+                inst_btn.config(state="normal")
+                del_btn.config(state="disabled")
 
     def _install_local_whisper(self):
         self._fw_btn.config(state="disabled")
@@ -1824,15 +1934,45 @@ class SetupScreen(tk.Frame):
                 install_faster_whisper(
                     lambda msg: self.after(0, lambda: self._fw_status.config(text=msg, fg=C["warn"]))
                 )
-                self.after(0, lambda: self._fw_status.config(
-                    text="✓ Installed — model downloads on first use", fg=C["success"]))
-                self.after(0, lambda: self._fw_btn.config(
-                    text="✓ Installed", state="disabled", fg=C["success"]))
+                self.after(0, self._check_local_whisper_status)
             except Exception as e:
                 self.after(0, lambda: self._fw_status.config(text=f"✗ {e}", fg=C["error"]))
                 self.after(0, lambda: self._fw_btn.config(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _download_model(self, model_name):
+        if not faster_whisper_installed():
+            self._fw_status.config(text="Install faster-whisper first (button above) →", fg=C["warn"])
+            return
+        lbl, inst_btn, del_btn = self._model_row_widgets[model_name]
+        inst_btn.config(state="disabled")
+        lbl.config(text="Downloading…", fg=C["warn"])
+
+        def run():
+            try:
+                download_whisper_model(
+                    model_name,
+                    lambda msg: self.after(0, lambda: lbl.config(text=msg[:22], fg=C["warn"]))
+                )
+                self.after(0, self._check_local_whisper_status)
+            except Exception as e:
+                self.after(0, lambda: lbl.config(text=f"✗ {str(e)[:20]}", fg=C["error"]))
+                self.after(0, lambda: inst_btn.config(state="normal"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _delete_model(self, model_name):
+        if not messagebox.askyesno("Delete model",
+                f"Delete the '{model_name}' model files from disk?\n"
+                "This frees space but requires re-downloading before next use."):
+            return
+        try:
+            delete_whisper_model(model_name)
+        except Exception as e:
+            messagebox.showerror("Delete failed", str(e))
+            return
+        self._check_local_whisper_status()
 
     def _collect(self):
         s = dict(self.s)
@@ -2118,51 +2258,54 @@ class OverlayScreen(tk.Frame):
         self.chat.bind("<Button-3>", lambda e: self._ctx_menu.tk_popup(e.x_root, e.y_root))
 
         # ── Controls row ──────────────────────────────────────────────────────
-        ctrl = tk.Frame(self, bg=C["bg"], pady=6)
+        ctrl = tk.Frame(self, bg=C["bg"], pady=7)
         ctrl.pack(fill="x", padx=14)
 
-        self.toggle_btn = tk.Button(ctrl, text="▶  START LISTENING  (Ctrl+L)",
+        # Group A — primary action
+        self.toggle_btn = tk.Button(ctrl, text="▶  START  (Ctrl+L)",
             font=(_f, 11, "bold"),
             bg="#05282a", fg=C["accent"],
             activebackground="#0a3a3e", activeforeground=C["accent"],
-            relief="flat", bd=0, cursor="hand2", padx=18, pady=8,
+            relief="flat", bd=0, cursor="hand2", padx=16, pady=8,
             command=self.toggle_listening)
         self.toggle_btn.pack(side="left")
         _hover_btn(self.toggle_btn, "#0a3a3e", C["accent"])
 
-        clear_btn = tk.Button(ctrl, text="✕  CLEAR",
-                  font=MONO9,
-                  bg=C["panel2"], fg=C["fg2"],
-                  activebackground=C["border"], activeforeground=C["fg"],
+        # Group B — log controls (subtle separator via padx gap)
+        tk.Frame(ctrl, bg=C["border"], width=1).pack(side="left", fill="y", padx=(10, 10), pady=4)
+
+        clear_btn = tk.Button(ctrl, text="✕ Clear",
+                  font=MONO9, bg=C["panel2"], fg=C["fg2"],
+                  activebackground="#2a0a0a", activeforeground=C["error"],
                   relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self.clear)
-        clear_btn.pack(side="left", padx=8)
-        _hover_btn(clear_btn, C["border"], C["fg"])
+        clear_btn.pack(side="left")
+        _hover_btn(clear_btn, "#2a0a0a", C["error"])
 
-        # #1 Save button
-        save_btn = tk.Button(ctrl, text="⬇ SAVE",
+        save_btn = tk.Button(ctrl, text="⬇ Save",
                   font=MONO9, bg=C["panel2"], fg=C["fg2"],
                   activebackground=C["border"], activeforeground=C["fg"],
                   relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self.save_transcript)
-        save_btn.pack(side="left", padx=(0, 8))
+        save_btn.pack(side="left", padx=(4, 0))
         _hover_btn(save_btn, C["border"], C["fg"])
 
-        # #3 Auto-scroll toggle
         self._autoscroll = [True]
-        self._scroll_btn = tk.Button(ctrl, text="⬇ AUTO",
+        self._scroll_btn = tk.Button(ctrl, text="⬇ Auto",
                   font=MONO9, bg=C["panel2"], fg=C["accent"],
                   activebackground=C["border"], activeforeground=C["accent"],
                   relief="flat", bd=0, cursor="hand2", padx=10, pady=8,
                   command=self._toggle_autoscroll)
-        self._scroll_btn.pack(side="left")
+        self._scroll_btn.pack(side="left", padx=(4, 0))
         _hover_btn(self._scroll_btn, C["border"], C["accent"])
 
-        # Screen watch button + region picker
-        sw_frame = tk.Frame(ctrl, bg=C["bg"])
-        sw_frame.pack(side="left", padx=(8, 0))
+        # Group C — screen watch (subtle separator)
+        tk.Frame(ctrl, bg=C["border"], width=1).pack(side="left", fill="y", padx=(10, 10), pady=4)
 
-        self._screen_btn = tk.Button(sw_frame, text="👁 WATCH SCREEN",
+        sw_frame = tk.Frame(ctrl, bg=C["bg"])
+        sw_frame.pack(side="left")
+
+        self._screen_btn = tk.Button(sw_frame, text="👁 Screen Watch",
                   font=MONO9, bg="#0a001a", fg="#c084fc",
                   activebackground="#160028", activeforeground="#c084fc",
                   relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
@@ -2175,18 +2318,18 @@ class OverlayScreen(tk.Frame):
                   activebackground=C["border"], activeforeground=C["fg"],
                   relief="flat", bd=0, cursor="hand2", padx=8, pady=8,
                   command=self._pick_region)
-        self._region_btn.pack(side="left", padx=(2, 0))
+        self._region_btn.pack(side="left", padx=(3, 0))
         _hover_btn(self._region_btn, C["border"], C["fg"])
 
         self._region_lbl = tk.Label(sw_frame, text="full screen",
-                  font=MONO7, bg=C["bg"], fg=C["fg2"])
+                  font=MONO7, bg=C["bg"], fg="#334466")
         self._region_lbl.pack(side="left", padx=4)
 
-        # Opacity slider (right side)
+        # Group D — opacity (right-aligned)
         opacity_frame = tk.Frame(ctrl, bg=C["bg"])
         opacity_frame.pack(side="right")
         tk.Label(opacity_frame, text="OPACITY", font=MONO7,
-                 bg=C["bg"], fg="#222233").pack(side="left", padx=(0, 4))
+                 bg=C["bg"], fg="#2a2a44").pack(side="left", padx=(0, 4))
         self.opacity_var = tk.DoubleVar(value=self.s.get("opacity", 0.94))
 
         def _on_opacity(v):
@@ -2198,7 +2341,7 @@ class OverlayScreen(tk.Frame):
                  orient="horizontal", variable=self.opacity_var,
                  command=_on_opacity,
                  bg=C["bg"], fg=C["border2"], troughcolor=C["panel2"],
-                 highlightthickness=0, bd=0, length=90, showvalue=False
+                 highlightthickness=0, bd=0, length=80, showvalue=False
                  ).pack(side="left")
 
         self.master.attributes("-alpha", self.s.get("opacity", 0.94))
