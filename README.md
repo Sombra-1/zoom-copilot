@@ -1,4 +1,4 @@
-# Zoom Co-Pilot
+# Open Meeting Copilot
 
 > Real-time AI assistant for Zoom, Teams, and Google Meet.
 
@@ -7,7 +7,7 @@
 ![Release](https://img.shields.io/github/v/release/Sombra-1/zoom-copilot)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
 
-Listens to your meeting audio, transcribes it, and gives you AI-generated replies — all in a floating overlay that's **invisible to screen share**.
+Listens to your meeting audio, transcribes it, and turns the conversation into live context, summaries, decisions, action items, and Markdown notes from a floating overlay.
 
 > **Copyright (C) 2026 Sombra-1** — Licensed under [GPL v3](LICENSE).
 > You may use, modify, and share this project freely, but you must keep the copyright notice and release any modifications under the same license.
@@ -18,10 +18,13 @@ Listens to your meeting audio, transcribes it, and gives you AI-generated replie
 
 - **Real-time transcription** — Groq Whisper (cloud, fast) or Local Whisper (fully offline, no internet needed)
 - **Multiple AI backends** — Ollama (free/local), Groq (free cloud), Claude (Anthropic), Demo
+- **Structured meeting notes** — one-click Summary, Decisions, Action Items, and Open Questions
+- **Markdown export** — save notes, backend/privacy mode, and raw transcript in an open format
+- **Privacy badges** — quickly see whether audio + AI are local-first, hybrid, or cloud-backed
 - **Smart AI trigger** — only responds when something worth noting is said (questions, prices, keywords) — saves ~70% of API tokens
 - **Interview mode** — STAR-format suggested answers using your resume and role context
 - **Screen watch** — periodic AI vision analysis of a selected screen region
-- **Screen-share invisible** — overlay is hidden from screen capture by default; toggle with the lock button
+- **Screen-share controls** — on supported Windows builds, the overlay can be hidden from screen capture; toggle with the lock button
 - **Opacity slider** — adjust window transparency for overlay use
 - **Manual input** — type questions to the AI mid-call
 - **Timestamps** on every message
@@ -41,7 +44,12 @@ Listens to your meeting audio, transcribes it, and gives you AI-generated replie
 
 **Step 3** — Double-click **Zoom Co-Pilot** on your Desktop (shortcut created by setup.bat)
 
-**Step 4** — Paste your Groq API key in Section 03, then click **LAUNCH**
+**Step 4** — Choose local or cloud transcription/AI in Settings, then click **LAUNCH**
+
+During a meeting:
+- Click **START** to capture live audio.
+- Click **Notes** to generate structured meeting notes from the captured transcript.
+- Click **MD** to export notes and the raw transcript as Markdown.
 
 ### Cross-platform (Windows / Linux)
 
@@ -85,6 +93,15 @@ Local Whisper works anywhere — no internet, no VPN, no API key.
 Model sizes: `tiny` (40 MB) · `base` (150 MB) · `small` (500 MB) · `medium` (1.5 GB)
 
 To install: open the app → Settings → Section 03 → click **Install faster-whisper**.
+
+## Open-source direction
+
+The project is designed to stay auditable and forkable:
+
+- Local-first paths are available through Local Whisper and Ollama.
+- Cloud providers are bring-your-own-key where possible.
+- Meeting exports use plain Markdown instead of a proprietary format.
+- Notes are generated only from captured transcript text; the prompts tell the model not to invent owners, dates, decisions, or tasks.
 
 ---
 

@@ -116,7 +116,7 @@ MONO7 = (_f, 9)
 BIG   = (_f, 17, "bold")
 TITLE = (_f, 13, "bold")
 
-PLACEHOLDER = "Ask the AI or type a message…"
+PLACEHOLDER = "Ask the AI, paste context, or capture a note..."
 
 SYSTEM_PROMPT = (
     "You are a real-time AI co-pilot listening to a live call (Zoom/Teams/Meet). "
@@ -131,6 +131,32 @@ SYSTEM_PROMPT = (
     "4. When [USER] asks a question, answer it strictly based on the transcripts already received. "
     "5. Never roleplay, never speak as a call participant, never speculate beyond the transcript."
 )
+
+NOTES_SYSTEM_PROMPT = """\
+You are an open-source meeting note assistant.
+
+You receive a transcript log from a live meeting. Create concise Markdown notes.
+
+Return exactly these sections:
+## Summary
+- 2-5 bullets covering what happened.
+
+## Decisions
+- Concrete decisions only. If none were stated, write "- None captured yet."
+
+## Action Items
+- Use "- [ ] Owner/Team - task (due/date if stated)".
+- If no owner is stated, use "- [ ] Unassigned - task".
+- If none were stated, write "- None captured yet."
+
+## Open Questions
+- Questions, blockers, risks, or follow-ups. If none, write "- None captured yet."
+
+Rules:
+- Use only the transcript log. Do not invent names, decisions, owners, dates, or tasks.
+- Keep it useful for someone who missed the meeting.
+- Do not mention these rules.
+"""
 
 INTERVIEW_SYSTEM_PROMPT = """\
 You are a real-time interview co-pilot. The interviewer's speech arrives as [TRANSCRIPT].
@@ -177,6 +203,30 @@ def build_system_prompt(s):
         role = s.get("interview_role", "").strip()       or "Not provided."
         return INTERVIEW_SYSTEM_PROMPT.format(background=bg, role=role)
     return SYSTEM_PROMPT
+
+
+def privacy_mode_label(s):
+    """Return a compact privacy label for the configured AI/transcription path."""
+    local_ai = s.get("backend") in ("builtin", "ollama", "demo")
+    local_stt = s.get("transcription") == "local"
+    if local_ai and local_stt:
+        return "LOCAL-FIRST", C["success"], "audio + AI stay on this computer"
+    if local_stt:
+        return "LOCAL STT", C["warn"], "transcription is local; AI backend may use cloud"
+    if local_ai:
+        return "LOCAL AI", C["warn"], "AI is local; transcription may use Groq cloud"
+    return "CLOUD", C["accent"], "transcription and AI may use configured cloud APIs"
+
+
+def get_transcript_lines(limit=None):
+    """Return transcript-only lines from conversation history."""
+    with _history_lock:
+        rows = [
+            m["content"].replace("[TRANSCRIPT]", "", 1).strip()
+            for m in conversation_history
+            if m.get("role") == "user" and m.get("content", "").startswith("[TRANSCRIPT]")
+        ]
+    return rows[-limit:] if limit else rows
 
 
 SCREEN_PROMPT = (
@@ -512,11 +562,8 @@ def screen_watch_loop(s, gui):
 
 # ── AI backends ───────────────────────────────────────────────────────────────
 
-def ask_ai(messages, s):
+def _call_ai_backend(messages, s, sys_prompt, max_tok=300):
     backend = s["backend"]
-    sys_prompt = build_system_prompt(s)
-    # Interview mode needs slightly more tokens for the structured answer format
-    max_tok = 400 if s.get("interview_mode") else 300
 
     if backend not in ("demo", "builtin", "ollama", "claude", "groq"):
         raise ValueError(f"Unknown backend: {backend}")
@@ -596,6 +643,18 @@ def ask_ai(messages, s):
         import random, time
         time.sleep(0.6)  # fake thinking delay
         last = messages[-1]["content"] if messages else ""
+        if sys_prompt == NOTES_SYSTEM_PROMPT:
+            return (
+                "## Summary\n"
+                "- Demo notes generated from the captured transcript.\n"
+                "- Switch to a real backend for production meeting notes.\n\n"
+                "## Decisions\n"
+                "- None captured yet.\n\n"
+                "## Action Items\n"
+                "- [ ] Unassigned - Review the captured transcript.\n\n"
+                "## Open Questions\n"
+                "- None captured yet."
+            )
         responses = [
             "This is Demo Mode — the UI is working perfectly. In a real call, I'd answer what they just said.",
             "Demo response: I can see the transcript came through. Everything is connected correctly.",
@@ -604,6 +663,35 @@ def ask_ai(messages, s):
             f"Got your message: '{last[:60]}...' — In production I'd analyze this and give a proper response.",
         ]
         return random.choice(responses)
+
+
+def ask_ai(messages, s):
+    """Ask the configured backend for a real-time call reply."""
+    # Interview mode needs slightly more tokens for the structured answer format
+    max_tok = 400 if s.get("interview_mode") else 300
+    return _call_ai_backend(messages, s, build_system_prompt(s), max_tok=max_tok)
+
+
+def ask_meeting_notes(transcript_lines, s):
+    """Generate structured meeting notes from transcript-only context."""
+    if not transcript_lines:
+        return (
+            "## Summary\n"
+            "- No transcript has been captured yet.\n\n"
+            "## Decisions\n"
+            "- None captured yet.\n\n"
+            "## Action Items\n"
+            "- None captured yet.\n\n"
+            "## Open Questions\n"
+            "- None captured yet."
+        )
+
+    transcript = "\n".join(f"- {line}" for line in transcript_lines[-80:])
+    messages = [{
+        "role": "user",
+        "content": f"[TRANSCRIPT_LOG]\n{transcript}",
+    }]
+    return _call_ai_backend(messages, s, NOTES_SYSTEM_PROMPT, max_tok=800)
 
 
 
@@ -1150,9 +1238,9 @@ class SetupScreen(tk.Frame):
                  bg=C["bg"], fg=C["accent"]).pack(side="left")
         tf = tk.Frame(hdr, bg=C["bg"])
         tf.pack(side="left", padx=12)
-        tk.Label(tf, text="ZOOM CO-PILOT", font=BIG,
+        tk.Label(tf, text="OPEN MEETING COPILOT", font=BIG,
                  bg=C["bg"], fg=C["fg"]).pack(anchor="w")
-        tk.Label(tf, text="real-time AI assistant for your calls",
+        tk.Label(tf, text="local-first notes, transcripts, and call context",
                  font=MONO8, bg=C["bg"], fg=C["fg2"]).pack(anchor="w")
 
         # Double-line divider like the overlay
@@ -2164,6 +2252,7 @@ class OverlayScreen(tk.Frame):
         self.s                 = settings
         self.on_settings       = on_settings
         self.on_toggle_capture = on_toggle_capture
+        self._latest_notes     = ""
         self._build()
 
     def _build(self):
@@ -2176,7 +2265,7 @@ class OverlayScreen(tk.Frame):
         logo_frame.pack(side="left")
         tk.Label(logo_frame, text="◈", font=(_f, 18, "bold"),
                  bg=C["bg"], fg=C["accent"]).pack(side="left", padx=(0, 6))
-        tk.Label(logo_frame, text="ZOOM CO-PILOT", font=TITLE,
+        tk.Label(logo_frame, text="OPEN MEETING COPILOT", font=TITLE,
                  bg=C["bg"], fg=C["fg"]).pack(side="left")
 
         # Backend badge
@@ -2192,6 +2281,19 @@ class OverlayScreen(tk.Frame):
         badge = tk.Label(hdr, text=f"  {b.upper()}  ", font=MONO7,
                          bg=bb, fg=bf, padx=2, pady=3)
         badge.pack(side="left", padx=8)
+
+        privacy_name, privacy_fg, privacy_tip = privacy_mode_label(self.s)
+        privacy_badge = tk.Label(hdr, text=f"  {privacy_name}  ", font=MONO7,
+                                 bg=C["panel2"], fg=privacy_fg, padx=2, pady=3)
+        privacy_badge.pack(side="left", padx=(0, 4))
+        privacy_badge.bind(
+            "<Enter>",
+            lambda e: self.set_status(privacy_tip, privacy_fg))
+        privacy_badge.bind(
+            "<Leave>",
+            lambda e: self.set_status(
+                "Listening..." if _listen_event.is_set() else "idle",
+                C["accent"] if _listen_event.is_set() else C["fg2"]))
 
         # Interview Mode indicator badge
         if self.s.get("interview_mode"):
@@ -2296,6 +2398,22 @@ class OverlayScreen(tk.Frame):
                   command=self.save_transcript)
         save_btn.pack(side="left", padx=(4, 0))
         _hover_btn(save_btn, C["border"], C["fg"])
+
+        self._notes_btn = tk.Button(ctrl, text="Notes",
+                  font=MONO9, bg=C["panel2"], fg=C["success"],
+                  activebackground=C["border"], activeforeground=C["success"],
+                  relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
+                  command=self._generate_meeting_notes)
+        self._notes_btn.pack(side="left", padx=(4, 0))
+        _hover_btn(self._notes_btn, C["border"], C["success"])
+
+        export_md_btn = tk.Button(ctrl, text="MD",
+                  font=MONO9, bg=C["panel2"], fg=C["fg2"],
+                  activebackground=C["border"], activeforeground=C["fg"],
+                  relief="flat", bd=0, cursor="hand2", padx=10, pady=8,
+                  command=self.export_meeting_markdown)
+        export_md_btn.pack(side="left", padx=(4, 0))
+        _hover_btn(export_md_btn, C["border"], C["fg"])
 
         self._autoscroll = [True]
         self._scroll_btn = tk.Button(ctrl, text="⬇ Auto",
@@ -2458,7 +2576,7 @@ class OverlayScreen(tk.Frame):
         ))
 
         # Keyboard hint
-        tk.Label(self, text="Enter = send  ·  Shift+↵ = newline  ·  Ctrl+V = paste code",
+        tk.Label(self, text="Enter = send  |  Shift+Enter = newline  |  Notes = summary/actions  |  MD = export",
                  font=MONO7, bg=C["bg"], fg="#1e2d3d", anchor="e"
                  ).pack(fill="x", padx=16, pady=(0, 2))
 
@@ -2471,6 +2589,13 @@ class OverlayScreen(tk.Frame):
 
         # #4 Ctrl+L shortcut
         self.master.bind("<Control-l>", lambda e: self.toggle_listening())
+
+        privacy_name, _, privacy_tip = privacy_mode_label(self.s)
+        self.append_message(
+            "SYSTEM",
+            f"{privacy_name}: {privacy_tip}. Use Notes for summary/actions and MD to export.",
+            "ai",
+        )
 
     def append_message(self, label, text, kind="them"):
         def _w():
@@ -2518,6 +2643,78 @@ class OverlayScreen(tk.Frame):
         if path:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(content)
+
+    def export_meeting_markdown(self):
+        """Export structured notes plus raw transcript as Markdown."""
+        transcript_lines = get_transcript_lines()
+        chat_content = self.chat.get("1.0", "end").strip()
+        if not transcript_lines and not chat_content:
+            messagebox.showinfo("Nothing to export", "The meeting transcript is empty.")
+            return
+
+        default_name = f"meeting_notes_{time.strftime('%Y%m%d_%H%M%S')}.md"
+        path = filedialog.asksaveasfilename(
+            defaultextension=".md",
+            filetypes=[("Markdown files", "*.md"), ("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=default_name,
+            title="Export meeting notes",
+        )
+        if not path:
+            return
+
+        privacy_name, _, privacy_tip = privacy_mode_label(self.s)
+        notes = self._latest_notes.strip() or (
+            "## Summary\n"
+            "- Generate AI notes from the overlay to include a structured summary here.\n\n"
+            "## Decisions\n"
+            "- None captured yet.\n\n"
+            "## Action Items\n"
+            "- None captured yet.\n\n"
+            "## Open Questions\n"
+            "- None captured yet."
+        )
+        raw_transcript = "\n".join(f"- {line}" for line in transcript_lines) or "_No transcript captured._"
+        content = (
+            f"# Meeting Notes\n\n"
+            f"- Exported: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"- AI backend: {self.s.get('backend', 'unknown')}\n"
+            f"- Transcription: {self.s.get('transcription', 'unknown')}\n"
+            f"- Privacy mode: {privacy_name} ({privacy_tip})\n\n"
+            f"{notes}\n\n"
+            f"## Raw Transcript\n{raw_transcript}\n"
+        )
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        self.set_status("Markdown exported", C["success"])
+
+    def _generate_meeting_notes(self):
+        """Generate AI summary, decisions, action items, and open questions."""
+        transcript_lines = get_transcript_lines(limit=80)
+        if not transcript_lines:
+            self.append_message("SYSTEM", "No transcript captured yet. Start listening first.", "ai")
+            return
+
+        self._notes_btn.config(state="disabled", text="Notes...")
+        self.set_status("AI thinking...", "#aa88ff")
+
+        def run():
+            _stats_inc("ai_calls")
+            try:
+                notes = ask_meeting_notes(transcript_lines, self.s)
+                self._latest_notes = notes
+                with _history_lock:
+                    conversation_history.append({"role": "assistant", "content": notes})
+                self.append_message("NOTES", notes, "ai")
+            except Exception as e:
+                _stats_inc("errors")
+                self.append_message("ERROR", f"Meeting notes failed: {e}", "error")
+            finally:
+                live = _listen_event.is_set()
+                self.after(0, lambda: self._notes_btn.config(state="normal", text="Notes"))
+                self.set_status("Listening..." if live else "idle", C["accent"] if live else C["fg2"])
+                self.update_stats()
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _copy_last_ai(self):
         """#2 Copy the last AI reply to the clipboard."""
@@ -2772,7 +2969,7 @@ class OverlayScreen(tk.Frame):
 class App:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Zoom Co-Pilot")
+        self.root.title("Open Meeting Copilot")
         self.root.configure(bg=C["bg"])
         self.root.attributes("-topmost", True)
         self.root.resizable(True, True)
@@ -2895,7 +3092,7 @@ class App:
             pystray.MenuItem("Restore", _on_restore, default=True),
             pystray.MenuItem("Quit", _on_quit),
         )
-        self._tray_icon = pystray.Icon("zoom-copilot", _make_icon(), "Zoom Co-Pilot", menu)
+        self._tray_icon = pystray.Icon("open-meeting-copilot", _make_icon(), "Open Meeting Copilot", menu)
         threading.Thread(target=self._tray_icon.run, daemon=True).start()
 
     def run(self):
