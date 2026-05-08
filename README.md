@@ -24,10 +24,11 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 - **Smart AI trigger** — only responds when something worth noting is said (questions, prices, keywords) — saves ~70% of API tokens
 - **Interview mode** — STAR-format suggested answers using your resume and role context
 - **Screen watch** — periodic AI vision analysis of a selected screen region
-- **Screen-share controls** — on supported Windows builds, the overlay can be hidden from screen capture; toggle with the lock button
+- **Screen-share controls** — on supported Windows builds, the overlay requests OS-level capture exclusion and only reports hidden after Windows accepts it
 - **Opacity slider** — adjust window transparency for overlay use
 - **Manual input** — type questions to the AI mid-call
 - **Timestamps** on every message
+- **Hardened runtime settings** — settings are validated, clamped, and written atomically
 - **One-click setup** — `setup.bat` or `setup.py` installs everything automatically
 
 ---
@@ -94,6 +95,19 @@ Model sizes: `tiny` (40 MB) · `base` (150 MB) · `small` (500 MB) · `medium` (
 
 To install: open the app → Settings → Section 03 → click **Install faster-whisper**.
 
+## Windows Screen-share Hiding
+
+On Windows 10 version 2004+ and Windows 11, the overlay uses the Windows `SetWindowDisplayAffinity` API with `WDA_EXCLUDEFROMCAPTURE`.
+
+What this means:
+
+- If the lock button says **Hidden from capture**, Windows accepted the capture-exclusion request.
+- If Windows rejects the request, the app shows **Capture hide failed** instead of claiming it is hidden.
+- Normal Zoom, Teams, and Meet screen sharing on Windows should respect this protection.
+- Some capture paths can still see the overlay, including cameras pointed at the monitor, capture cards, VM-level capture, remote desktop/driver-level capture, or tools that bypass normal Windows capture APIs.
+
+Always test your exact meeting app and sharing mode with a second device/account before relying on this behavior.
+
 ## Open-source direction
 
 The project is designed to stay auditable and forkable:
@@ -102,6 +116,8 @@ The project is designed to stay auditable and forkable:
 - Cloud providers are bring-your-own-key where possible.
 - Meeting exports use plain Markdown instead of a proprietary format.
 - Notes are generated only from captured transcript text; the prompts tell the model not to invent owners, dates, decisions, or tasks.
+- API keys are stored only in the local `.copilot_settings.json`; on non-Windows systems the file is restricted to the current user.
+- Audio-processing workers are capped so slow transcription or AI calls do not spawn unbounded background threads.
 
 ---
 
@@ -128,6 +144,7 @@ Enable in Settings → toggle **Interview Mode**.
 
 - **Groq 403 error** — Your region may be blocked. Switch to **Local Whisper** in Section 03 (fully offline, no API needed).
 - **No audio captured** — Make sure Zoom's speaker is set to **CABLE Input**.
+- **Overlay still appears in a share** — Confirm the button says **Hidden from capture**. If it says **Capture hide failed**, Windows rejected the capture-exclusion call. If it says hidden but still appears, test a different share mode; some capture tools bypass the Windows API.
 - **Python not found** — Install Python 3.8+ from [python.org](https://www.python.org/downloads/) and check "Add to PATH".
 - **Setup errors** — Check `setup_log.txt` in the project folder.
 
