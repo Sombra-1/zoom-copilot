@@ -2311,7 +2311,7 @@ class OverlayScreen(tk.Frame):
 
         if self.on_toggle_capture and sys.platform == "win32":
             self._capture_btn = tk.Button(
-                hdr, text="🔒 Hidden",
+                hdr, text="Checking capture hide...",
                 font=MONO8, bg=C["panel2"], fg=C["success"],
                 activebackground=C["border"], activeforeground=C["warn"],
                 relief="flat", bd=0, cursor="hand2", padx=8, pady=3)
@@ -3037,16 +3037,47 @@ class App:
 
     def _toggle_capture(self, btn):
         """Toggle screen capture visibility and update the button label."""
-        self._capture_hidden[0] = not self._capture_hidden[0]
-        hidden = self._capture_hidden[0]
+        hidden = not self._capture_hidden[0]
         ok = self._set_capture_hidden(hidden)
+        if ok:
+            self._capture_hidden[0] = hidden
+            btn.config(
+                text="🔒 Hidden from capture" if hidden else "👁  Visible in capture",
+                fg=C["success"] if hidden else C["warn"],
+            )
+        else:
+            btn.config(text="⚠ Capture hide failed", fg=C["warn"])
+
+    def _capture_button(self):
+        btn = getattr(self.current, "_capture_btn", None)
+        if btn and btn.winfo_exists():
+            return btn
+        return None
+
+    def _set_capture_button_state(self, hidden: bool, ok: bool):
+        btn = self._capture_button()
+        if not btn:
+            return
         if ok:
             btn.config(
                 text="🔒 Hidden from capture" if hidden else "👁  Visible in capture",
                 fg=C["success"] if hidden else C["warn"],
             )
         else:
-            btn.config(text="⚠ Not supported on this Windows", fg=C["warn"])
+            btn.config(text="⚠ Capture hide failed", fg=C["warn"])
+
+    def _root_hwnd(self):
+        """Return the real top-level HWND for Tk's root window."""
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        hwnd = self.root.winfo_id()
+        GA_ROOT = 2
+        root_hwnd = user32.GetAncestor(hwnd, GA_ROOT)
+        return root_hwnd or hwnd
 
     def _set_capture_hidden(self, hidden: bool):
         """Show or hide the window from screen capture (Windows 10 2004+ only)."""
@@ -3054,12 +3085,31 @@ class App:
             return False
         try:
             import ctypes
-            hwnd = self.root.winfo_id()
+            from ctypes import wintypes
+
+            self.root.update_idletasks()
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+            user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+            if hasattr(ctypes, "set_last_error"):
+                ctypes.set_last_error(0)
+            hwnd = self._root_hwnd()
             # WDA_EXCLUDEFROMCAPTURE=0x11 → black in captures; WDA_NONE=0x0 → visible
             affinity = 0x00000011 if hidden else 0x00000000
-            ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, affinity)
+            ok = bool(user32.SetWindowDisplayAffinity(hwnd, affinity))
+            if not ok:
+                last_error = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
+                print(
+                    f"SetWindowDisplayAffinity failed: "
+                    f"hwnd={hwnd}, affinity={affinity:#x}, error={last_error}",
+                    file=sys.stderr,
+                )
+                self._set_capture_button_state(hidden, False)
+                return False
+            self._set_capture_button_state(hidden, True)
             return True
         except Exception:
+            self._set_capture_button_state(hidden, False)
             return False
 
     def _minimize_to_tray(self):
