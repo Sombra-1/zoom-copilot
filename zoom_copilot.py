@@ -69,6 +69,7 @@ conversation_history = []
 _history_lock        = threading.Lock()    # guards conversation_history
 _listen_event        = threading.Event()   # replaces bool flag — thread-safe
 stream               = None
+_audio_workers       = threading.BoundedSemaphore(2)
 
 # ── Session stats (thread-safe via atomic int ops on GIL + _stats_lock) ──────
 _stats_lock = threading.Lock()
@@ -117,6 +118,21 @@ BIG   = (_f, 17, "bold")
 TITLE = (_f, 13, "bold")
 
 PLACEHOLDER = "Ask the AI, paste context, or capture a note..."
+BACKEND_CHOICES = ("builtin", "demo", "ollama", "claude", "groq")
+TRANSCRIPTION_CHOICES = ("groq", "local")
+WHISPER_MODELS = (
+    "whisper-large-v3-turbo",      # fast, great quality — default
+    "whisper-large-v3",            # highest accuracy, ~2× slower
+    "distil-whisper-large-v3-en",  # English only, fastest
+)
+GROQ_AI_MODELS = (
+    "llama-3.1-8b-instant",     # fastest — default
+    "llama-3.3-70b-versatile",  # best quality
+    "llama-3.1-70b-versatile",  # great quality
+    "gemma2-9b-it",             # Google Gemma, fast
+    "mixtral-8x7b-32768",       # long context
+)
+LOCAL_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v2")
 
 SYSTEM_PROMPT = (
     "You are a real-time AI co-pilot listening to a live call (Zoom/Teams/Meet). "
@@ -253,8 +269,8 @@ def _hover_btn(btn, hover_bg, hover_fg=None):
 
 # ── Settings persistence ───────────────────────────────────────────────────────
 
-def load_settings():
-    defaults = {
+def _default_settings():
+    return {
         "backend":       "builtin",
         "ollama_host":   "http://localhost:11434",
         "ollama_model":  "llama3.1:8b",
@@ -275,22 +291,82 @@ def load_settings():
         "interview_background":  "",    # candidate resume / skills / experience
         "interview_role":        "",    # role title + company + job description snippet
     }
+
+
+def _clamp_int(value, default, low, high):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def _clamp_float(value, default, low, high):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, value))
+
+
+def _coerce_settings(s):
+    defaults = _default_settings()
+    cleaned = dict(defaults)
+    if isinstance(s, dict):
+        cleaned.update(s)
+
+    if cleaned.get("backend") not in BACKEND_CHOICES:
+        cleaned["backend"] = defaults["backend"]
+    if cleaned.get("transcription") not in TRANSCRIPTION_CHOICES:
+        cleaned["transcription"] = defaults["transcription"]
+    if cleaned.get("whisper_model") not in WHISPER_MODELS:
+        cleaned["whisper_model"] = defaults["whisper_model"]
+    if cleaned.get("local_whisper_model") not in LOCAL_WHISPER_MODELS:
+        cleaned["local_whisper_model"] = defaults["local_whisper_model"]
+    if cleaned.get("groq_model") not in GROQ_AI_MODELS:
+        cleaned["groq_model"] = defaults["groq_model"]
+
+    cleaned["chunk_seconds"] = _clamp_int(cleaned.get("chunk_seconds"), defaults["chunk_seconds"], 2, 30)
+    cleaned["screen_interval"] = _clamp_int(cleaned.get("screen_interval"), defaults["screen_interval"], 3, 300)
+    cleaned["opacity"] = _clamp_float(cleaned.get("opacity"), defaults["opacity"], 0.3, 1.0)
+    cleaned["interview_mode"] = bool(cleaned.get("interview_mode"))
+
+    for key in (
+        "ollama_host", "ollama_model", "anthropic_key", "claude_model",
+        "groq_key", "language", "device_name", "custom_keywords",
+        "interview_background", "interview_role",
+    ):
+        cleaned[key] = str(cleaned.get(key, defaults.get(key, ""))).strip()
+
+    return cleaned
+
+
+def load_settings():
+    defaults = _default_settings()
     if os.path.exists(SETTINGS_FILE):
         try:
             with open(SETTINGS_FILE) as f:
                 saved = json.load(f)
             defaults.update(saved)
+            if sys.platform != "win32":
+                try:
+                    os.chmod(SETTINGS_FILE, 0o600)
+                except OSError:
+                    pass
         except Exception:
             pass
-    return defaults
+    return _coerce_settings(defaults)
 
 
 def save_settings(s):
-    with open(SETTINGS_FILE, "w") as f:
+    s = _coerce_settings(s)
+    tmp = f"{SETTINGS_FILE}.tmp"
+    with open(tmp, "w") as f:
         json.dump(s, f, indent=2)
     # Restrict file permissions so other users can't read API keys (no-op on Windows)
     if sys.platform != "win32":
-        os.chmod(SETTINGS_FILE, 0o600)
+        os.chmod(tmp, 0o600)
+    os.replace(tmp, SETTINGS_FILE)
 
 
 # ── Ollama auto-install helpers ───────────────────────────────────────────────
@@ -830,21 +906,6 @@ def _numpy_to_wav_bytes(audio_np):
     return buf.getvalue()
 
 
-WHISPER_MODELS = [
-    "whisper-large-v3-turbo",      # fast, great quality — default
-    "whisper-large-v3",            # highest accuracy, ~2× slower
-    "distil-whisper-large-v3-en",  # English only, fastest
-]
-
-GROQ_AI_MODELS = [
-    "llama-3.1-8b-instant",     # fastest — default
-    "llama-3.3-70b-versatile",  # best quality
-    "llama-3.1-70b-versatile",  # great quality
-    "gemma2-9b-it",             # Google Gemma, fast
-    "mixtral-8x7b-32768",       # long context
-]
-
-
 def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"):
     """Send audio to Groq's free Whisper API and return the transcript.
     Retries up to 2 times on transient network/server errors."""
@@ -889,7 +950,6 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
     raise last_err
 
 
-LOCAL_WHISPER_MODELS = ["tiny", "base", "small", "medium", "large-v2"]
 # Size guide: tiny=~40MB, base=~150MB, small=~500MB, medium=~1.5GB, large-v2=~3GB
 
 _local_whisper_model_cache = {}   # model_name → loaded model instance
@@ -989,13 +1049,24 @@ def transcribe_loop(s, gui):
             if sum(len(c) for c in buffer) >= chunk_samples:
                 audio_np = np.concatenate(buffer).flatten().astype(np.float32)
                 buffer = []
+                if not _audio_workers.acquire(blocking=False):
+                    _stats_inc("errors")
+                    gui.after(0, lambda: gui.set_status("Busy - skipping audio chunk", C["warn"]))
+                    continue
                 threading.Thread(
-                    target=process_audio,
+                    target=_process_audio_worker,
                     args=(audio_np, s, gui),
                     daemon=True,
                 ).start()
         except queue.Empty:
             continue
+
+
+def _process_audio_worker(audio_np, s, gui):
+    try:
+        process_audio(audio_np, s, gui)
+    finally:
+        _audio_workers.release()
 
 
 def _should_respond(text, history, custom_keywords="", interview_mode=False):
@@ -2075,20 +2146,12 @@ class SetupScreen(tk.Frame):
             val = var.get()
             # BooleanVar.get() returns bool; StringVar.get() returns str
             s[k] = val if isinstance(val, bool) else val.strip()
-        try:
-            s["chunk_seconds"] = int(s.get("chunk_seconds", 8))
-        except (ValueError, TypeError):
-            s["chunk_seconds"] = 8
-        try:
-            s["screen_interval"] = max(3, int(s.get("screen_interval", 10)))
-        except (ValueError, TypeError):
-            s["screen_interval"] = 10
         # Pull Text widget values (not in _vars)
         if hasattr(self, "_im_bg_text"):
             s["interview_background"] = self._im_bg_text.get("1.0", "end").strip()
         if hasattr(self, "_im_role_text"):
             s["interview_role"] = self._im_role_text.get("1.0", "end").strip()
-        return s
+        return _coerce_settings(s)
 
     def _validate(self, s):
         b = s["backend"]
@@ -2951,8 +3014,11 @@ class OverlayScreen(tk.Frame):
         _listen_event.clear()
         _screen_watch_event.clear()  # also stop screen watch if running
         if stream:
-            stream.stop()
-            stream.close()
+            try:
+                stream.stop()
+                stream.close()
+            except Exception as e:
+                self.append_message("ERROR", f"Audio stream stop failed: {e}", "error")
             stream = None
         self.toggle_btn.config(text="▶  START LISTENING  (Ctrl+L)",
                                bg="#05282a", fg=C["accent"],
