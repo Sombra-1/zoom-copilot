@@ -20,9 +20,10 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 - **Multiple AI backends** — Ollama (free/local), Groq (free cloud), Claude (Anthropic), Demo
 - **Structured meeting notes** — one-click Summary, Decisions, Action Items, and Open Questions
 - **Markdown export** — save notes, backend/privacy mode, and raw transcript in an open format
+- **Filterable overlay views** — switch between All, Transcript, AI, Notes, and Errors during a meeting
 - **Privacy badges** — quickly see whether audio + AI are local-first, hybrid, or cloud-backed
 - **Smart AI trigger** — only responds when something worth noting is said (questions, prices, keywords) — saves ~70% of API tokens
-- **Interview mode** — STAR-format suggested answers using your resume and role context
+- **Practice Assist mode** — honest answer drafts for mock interviews, accessibility support, or explicitly permitted help
 - **Screen watch** — periodic AI vision analysis of a selected screen region
 - **Screen-share controls** — on supported Windows builds, the overlay requests OS-level capture exclusion and only reports hidden after Windows accepts it
 - **Opacity slider** — adjust window transparency for overlay use
@@ -50,7 +51,7 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 During a meeting:
 - Click **START** to capture live audio.
 - Click **Notes** to generate structured meeting notes from the captured transcript.
-- Click **MD** to export notes and the raw transcript as Markdown.
+- Click **Export** to export notes and the raw transcript as Markdown.
 
 ### Cross-platform (Windows / Linux)
 
@@ -67,7 +68,7 @@ Checks all dependencies, installs missing ones, and launches the app.
 1. Go to [console.groq.com](https://console.groq.com)
 2. Sign up (no credit card needed)
 3. API Keys → Create API Key
-4. Copy the `gsk_...` value and paste it in Section 03 of the app
+4. Copy the `gsk_...` value and paste it in the **GROQ API KEY** box in Settings
 
 ---
 
@@ -121,13 +122,13 @@ The project is designed to stay auditable and forkable:
 
 ---
 
-## Interview Mode
+## Practice Assist Mode
 
-Enable in Settings → toggle **Interview Mode**.
+Enable in Settings → toggle **Practice Assist**.
 
-- Fill in your resume/background and the job title you're interviewing for
-- Every transcript automatically triggers a STAR-format suggested answer
-- Responses include context from your experience and the role
+- Fill in your real resume/background and role context.
+- Captured prompts trigger concise answer drafts grounded in that background.
+- Use it for practice, mock interviews, accessibility support, or situations where assistance is allowed.
 
 ---
 

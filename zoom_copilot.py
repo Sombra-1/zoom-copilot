@@ -89,23 +89,23 @@ _screen_region      = {"coords": None}  # {"coords": (left,top,right,bottom)} or
 
 # ── Colors / Fonts ────────────────────────────────────────────────────────────
 C = {
-    "bg":        "#0b0b0f",   # deep near-black with subtle blue tint
-    "panel":     "#111118",   # slightly lighter panel
-    "panel2":    "#16161f",   # card/input background
-    "border":    "#1e1e30",   # visible but subtle border
-    "border2":   "#2a2a40",   # slightly brighter border for hover
-    "accent":    "#00d4ff",   # vibrant cyan
-    "accent2":   "#0088bb",   # deeper cyan for buttons
-    "accent3":   "#7c3aed",   # purple for variety (AI messages)
-    "them":      "#94a3b8",   # cool slate-blue for THEM speech
-    "ai":        "#00d4ff",   # cyan for AI replies
-    "error":     "#ff4466",   # vivid red-pink
-    "success":   "#00e87a",   # vibrant green
-    "warn":      "#ffb300",   # amber
+    "bg":        "#0f1218",   # soft app background
+    "panel":     "#151a23",   # conversation surface
+    "panel2":    "#1c2430",   # controls and cards
+    "border":    "#2a3442",   # quiet dividers
+    "border2":   "#3a4656",   # hover border
+    "accent":    "#38bdf8",   # clear but less neon cyan
+    "accent2":   "#2563eb",   # primary action blue
+    "accent3":   "#8b5cf6",   # secondary accent
+    "them":      "#cbd5e1",   # transcript text
+    "ai":        "#7dd3fc",   # AI replies
+    "error":     "#fb7185",   # softer red
+    "success":   "#34d399",   # softer green
+    "warn":      "#fbbf24",   # amber
     "fg":        "#e2e8f0",   # warm-white primary text
-    "fg2":       "#475569",   # muted secondary text
-    "btn_hover": "#0d2d3d",
-    "input_bg":  "#0d0d16",
+    "fg2":       "#94a3b8",   # muted secondary text
+    "btn_hover": "#17344a",
+    "input_bg":  "#111827",
     "input_fg":  "#cbd5e1",
 }
 
@@ -128,9 +128,8 @@ WHISPER_MODELS = (
 GROQ_AI_MODELS = (
     "llama-3.1-8b-instant",     # fastest — default
     "llama-3.3-70b-versatile",  # best quality
-    "llama-3.1-70b-versatile",  # great quality
-    "gemma2-9b-it",             # Google Gemma, fast
-    "mixtral-8x7b-32768",       # long context
+    "openai/gpt-oss-20b",       # very fast reasoning-capable model
+    "openai/gpt-oss-120b",      # larger reasoning-capable model
 )
 LOCAL_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v2")
 
@@ -138,14 +137,15 @@ SYSTEM_PROMPT = (
     "You are a real-time AI co-pilot listening to a live call (Zoom/Teams/Meet). "
     "Transcribed speech from the call arrives labelled [TRANSCRIPT]. "
     "The user's own typed questions arrive labelled [USER]. "
-    "YOUR JOB: help the user understand or respond to what was actually said in the call. "
+    "YOUR JOB: help the user understand what was actually said and prepare grounded follow-ups. "
     "STRICT RULES — no exceptions: "
-    "1. ONLY use information from [TRANSCRIPT] messages. Never invent, assume, or add anything not said. "
+    "1. ONLY use information from [TRANSCRIPT] messages and the user's typed [USER] context. "
     "2. If no [TRANSCRIPT] has arrived yet, reply only: 'I don\'t hear anything yet.' "
     "3. When a [TRANSCRIPT] arrives, give a SHORT useful summary or insight (1-3 sentences max). "
-    "   Focus on: what was said, any key claim or opinion, and if helpful — a suggested reply for the user. "
-    "4. When [USER] asks a question, answer it strictly based on the transcripts already received. "
-    "5. Never roleplay, never speak as a call participant, never speculate beyond the transcript."
+    "   Focus on: what was said, decisions, risks, action items, open questions, and useful clarifying questions. "
+    "4. When [USER] asks a question, answer it strictly from transcripts already received. "
+    "5. Mark uncertainty clearly when the transcript is incomplete or ambiguous. "
+    "6. Never invent names, owners, dates, decisions, numbers, or facts not present in the transcript."
 )
 
 NOTES_SYSTEM_PROMPT = """\
@@ -175,8 +175,8 @@ Rules:
 """
 
 INTERVIEW_SYSTEM_PROMPT = """\
-You are a real-time interview co-pilot. The interviewer's speech arrives as [TRANSCRIPT].
-The candidate's own typed notes arrive as [USER].
+You are an interview practice and permitted accessibility assistant. Speech arrives as [TRANSCRIPT].
+The user's own typed notes arrive as [USER].
 
 CANDIDATE BACKGROUND:
 {background}
@@ -186,14 +186,14 @@ ROLE / COMPANY:
 
 YOUR JOB — for every [TRANSCRIPT]:
 1. Decide what type of question/statement it is.
-2. Suggest exactly what the candidate should say — concise, confident, tailored to their background.
+2. Draft a concise, honest answer the user can adapt, tailored only to their provided background.
 3. Use this format every time:
 
-💡 SAY: <2-4 sentence suggested answer, written in first person as if the candidate is speaking>
+SAY: <2-4 sentence suggested answer, written in first person, grounded in the background>
 
-• <key point or fact from their background to emphasise>
-• <second key point>
-• <optional: follow-up question the candidate could ask back>
+- <key point or fact from their background to emphasize>
+- <second key point>
+- <optional: follow-up question the candidate could ask back>
 
 QUESTION TYPE RULES:
 - Behavioral ("Tell me about a time…"): structure as Situation → Action → Result (STAR).
@@ -208,8 +208,9 @@ QUESTION TYPE RULES:
 STRICT RULES:
 - Never mention you are an AI.
 - Keep the total reply under 100 words so it fits on screen quickly.
-- Always use the candidate's actual skills/projects above — never invent experience.
-- If background is empty, give generic but strong interview answers.
+- Use only the user's actual skills/projects above. Never invent experience, credentials, employers, dates, or accomplishments.
+- If background is empty, give a generic structure and ask the user to fill it with their real experience.
+- If the user asks for deception or hidden assistance in an assessment where help is not permitted, give brief note-taking support instead.
 """
 
 def build_system_prompt(s):
@@ -232,6 +233,15 @@ def privacy_mode_label(s):
     if local_ai:
         return "LOCAL AI", C["warn"], "AI is local; transcription may use Groq cloud"
     return "CLOUD", C["accent"], "transcription and AI may use configured cloud APIs"
+
+
+def live_status_args():
+    """Return the status text/color that matches the current listening state."""
+    if _listen_event.is_set():
+        return "Listening...", C["accent"]
+    if _screen_watch_event.is_set():
+        return "Watching screen...", "#c084fc"
+    return "idle", C["fg2"]
 
 
 def get_transcript_lines(limit=None):
@@ -267,6 +277,60 @@ def _hover_btn(btn, hover_bg, hover_fg=None):
     btn.bind("<Enter>", lambda e: btn.config(bg=hover_bg, fg=hover_fg or orig_fg))
     btn.bind("<Leave>", lambda e: btn.config(bg=orig_bg, fg=orig_fg))
 
+
+class ToolTip:
+    """Small delayed tooltip for compact toolbar controls."""
+
+    def __init__(self, widget, text, delay=550):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip or not self.text:
+            return
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        self._tip = tw = tk.Toplevel(self.widget)
+        tw.wm_overrideredirect(True)
+        tw.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            tw, text=self.text, font=MONO8,
+            bg="#101826", fg=C["fg"], padx=8, pady=5,
+            relief="solid", bd=1, justify="left",
+        ).pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip:
+            try:
+                self._tip.destroy()
+            except Exception:
+                pass
+            self._tip = None
+
+
+def _tip(widget, text):
+    ToolTip(widget, text)
+    return widget
+
 # ── Settings persistence ───────────────────────────────────────────────────────
 
 def _default_settings():
@@ -275,7 +339,7 @@ def _default_settings():
         "ollama_host":   "http://localhost:11434",
         "ollama_model":  "llama3.1:8b",
         "anthropic_key": "",
-        "claude_model":  "claude-sonnet-4-6",
+        "claude_model":  "claude-sonnet-4-20250514",
         "groq_key":      "",
         "groq_model":    "llama-3.1-8b-instant",
         "whisper_model":       "whisper-large-v3-turbo",
@@ -287,7 +351,7 @@ def _default_settings():
         "opacity":             0.94,
         "custom_keywords":       "",     # comma-separated user-defined trigger words
         "screen_interval":       10,    # seconds between screen captures when watching
-        "interview_mode":        False, # when True: answer-suggestion mode instead of summary mode
+        "interview_mode":        False, # when True: practice/permitted answer-draft mode
         "interview_background":  "",    # candidate resume / skills / experience
         "interview_role":        "",    # role title + company + job description snippet
     }
@@ -314,6 +378,7 @@ def _coerce_settings(s):
     cleaned = dict(defaults)
     if isinstance(s, dict):
         cleaned.update(s)
+    cleaned.pop("advanced_setup", None)
 
     if cleaned.get("backend") not in BACKEND_CHOICES:
         cleaned["backend"] = defaults["backend"]
@@ -325,6 +390,8 @@ def _coerce_settings(s):
         cleaned["local_whisper_model"] = defaults["local_whisper_model"]
     if cleaned.get("groq_model") not in GROQ_AI_MODELS:
         cleaned["groq_model"] = defaults["groq_model"]
+    if cleaned.get("claude_model") == "claude-sonnet-4-6":
+        cleaned["claude_model"] = defaults["claude_model"]
 
     cleaned["chunk_seconds"] = _clamp_int(cleaned.get("chunk_seconds"), defaults["chunk_seconds"], 2, 30)
     cleaned["screen_interval"] = _clamp_int(cleaned.get("screen_interval"), defaults["screen_interval"], 3, 300)
@@ -337,6 +404,7 @@ def _coerce_settings(s):
         "interview_background", "interview_role",
     ):
         cleaned[key] = str(cleaned.get(key, defaults.get(key, ""))).strip()
+    cleaned["ollama_host"] = cleaned["ollama_host"].rstrip("/") or defaults["ollama_host"]
 
     return cleaned
 
@@ -387,7 +455,11 @@ def ollama_model_exists(model):
         import urllib.request, json as _json
         req = urllib.request.urlopen(f"{OLLAMA_BUILTIN_HOST}/api/tags", timeout=5)
         data = _json.loads(req.read())
-        return any(m["name"].startswith(model.split(":")[0]) for m in data.get("models", []))
+        for item in data.get("models", []):
+            name = str(item.get("name", "")).split("@", 1)[0]
+            if name == model:
+                return True
+        return False
     except Exception:
         return False
 
@@ -605,7 +677,7 @@ def screen_watch_loop(s, gui):
 
             # Skip if image is identical to previous capture (unchanged screen)
             if b64 == _prev_b64[0]:
-                gui.set_status("Listening...", C["accent"])
+                gui.set_status(*live_status_args())
                 continue
             _prev_b64[0] = b64
 
@@ -632,7 +704,7 @@ def screen_watch_loop(s, gui):
             _stats_inc("errors")
             gui.append_message("ERROR", f"Screen watch: {e}", "error")
 
-        gui.set_status("Listening...", C["accent"])
+        gui.set_status(*live_status_args())
         gui.update_stats()
 
 
@@ -743,7 +815,7 @@ def _call_ai_backend(messages, s, sys_prompt, max_tok=300):
 
 def ask_ai(messages, s):
     """Ask the configured backend for a real-time call reply."""
-    # Interview mode needs slightly more tokens for the structured answer format
+    # Practice assist mode needs slightly more tokens for the structured answer format.
     max_tok = 400 if s.get("interview_mode") else 300
     return _call_ai_backend(messages, s, build_system_prompt(s), max_tok=max_tok)
 
@@ -1071,7 +1143,7 @@ def _process_audio_worker(audio_np, s, gui):
 
 def _should_respond(text, history, custom_keywords="", interview_mode=False):
     """Return True if this transcript chunk warrants an AI response."""
-    # Interview mode: respond to everything — every word from the interviewer matters
+    # Practice assist mode: respond to every captured prompt.
     if interview_mode:
         return True
 
@@ -1108,7 +1180,7 @@ def _should_respond(text, history, custom_keywords="", interview_mode=False):
     transcript_count = sum(
         1 for m in history if m["role"] == "user" and "[TRANSCRIPT]" in m["content"]
     )
-    if transcript_count > 0 and transcript_count % 5 == 0:
+    if (transcript_count + 1) > 0 and (transcript_count + 1) % 5 == 0:
         return True
 
     return False
@@ -1145,7 +1217,7 @@ def process_audio(audio_np, s, gui):
         if not key:
             gui.append_message("ERROR",
                 "No Groq API key set.\n"
-                "Go to Settings → section 03 and add your Groq key, or switch to Local transcription.",
+                "Go to Settings and paste it in the GROQ API KEY box, or switch to Local transcription.",
                 "error")
             gui.after(0, gui._stop)
             return
@@ -1174,7 +1246,7 @@ def process_audio(audio_np, s, gui):
         return
 
     if not text or len(text) < 4:
-        gui.set_status("Listening...", C["accent"])
+        gui.set_status(*live_status_args())
         return
 
     _stats_inc("transcriptions")
@@ -1202,7 +1274,7 @@ def process_audio(audio_np, s, gui):
             _stats_inc("errors")
             gui.append_message("ERROR", str(e), "error")
 
-    gui.set_status("Listening...", C["accent"])
+    gui.set_status(*live_status_args())
     gui.update_stats()
 
 
@@ -1237,7 +1309,7 @@ class RegionSelector(tk.Toplevel):
         self.canvas.create_text(
             sw // 2, 36,
             text="Drag to select region   ·   Esc to cancel   ·   Release to confirm",
-            fill="#00d4ff", font=("Arial", 16),
+            fill=C["accent"], font=("Arial", 16),
         )
 
         self.canvas.bind("<ButtonPress-1>",   self._press)
@@ -1262,8 +1334,8 @@ class RegionSelector(tk.Toplevel):
             self._y0 - self.winfo_rooty(),
             self._x1 - self.winfo_rootx(),
             self._y1 - self.winfo_rooty(),
-            outline="#00d4ff", width=2, dash=(6, 4),
-            fill="#00d4ff",
+            outline=C["accent"], width=2, dash=(6, 4),
+            fill=C["accent"],
         )
         self.canvas.itemconfig(self._rect_id, stipple="gray25")
 
@@ -1353,15 +1425,19 @@ class SetupScreen(tk.Frame):
         canvas.bind("<Enter>", _bind_wheel)
         canvas.bind("<Leave>", _unbind_wheel)
 
+        self._quick_start(inner)
+
         # Backend
-        self._section(inner, "01  AI BACKEND")
+        self._backend_section = tk.Frame(inner, bg=C["bg"])
+        self._backend_section.pack(fill="x")
+        self._section(self._backend_section, "01  AI BACKEND")
         self._vars["backend"] = tk.StringVar(value=self.s["backend"])
         labels = {"builtin": "Built-in AI  (free, no account — installs automatically)",
                   "demo":    "Demo         (no AI — test the UI only)",
                   "ollama":  "Ollama       (free, local — bring your own model)",
                   "claude":  "Claude       (Anthropic API — paid)",
                   "groq":    "Groq         (free cloud, 14k req/day)"}
-        bf = tk.Frame(inner, bg=C["bg"])
+        bf = tk.Frame(self._backend_section, bg=C["bg"])
         bf.pack(fill="x", pady=(0, 16))
         for b in self.BACKENDS:
             tk.Radiobutton(
@@ -1374,7 +1450,7 @@ class SetupScreen(tk.Frame):
             ).pack(anchor="w", pady=2)
 
         # Container for backend-specific panels (keeps pack order stable)
-        self._backend_container = tk.Frame(inner, bg=C["bg"])
+        self._backend_container = tk.Frame(self._backend_section, bg=C["bg"])
         self._backend_container.pack(fill="x")
 
         # Built-in
@@ -1418,14 +1494,18 @@ class SetupScreen(tk.Frame):
         self._section(self._of, "02  OLLAMA SETTINGS")
         self._field(self._of, "Host",  "ollama_host",  "http://localhost:11434")
         self._field(self._of, "Model", "ollama_model", "llama3.1:8b")
-        self._note(self._of, "curl -fsSL https://ollama.com/install.sh | sh\nollama pull llama3.1:8b\nollama serve")
+        self._collapsible_note(
+            self._of, "Show Ollama terminal commands",
+            "curl -fsSL https://ollama.com/install.sh | sh\n"
+            "ollama pull llama3.1:8b\n"
+            "ollama serve")
 
         # Claude
         self._cf = tk.Frame(self._backend_container, bg=C["bg"])
         self._cf.pack(fill="x")
         self._section(self._cf, "02  ANTHROPIC API")
         self._field(self._cf, "API Key", "anthropic_key", "sk-ant-...", secret=True)
-        self._field(self._cf, "Model",   "claude_model",  "claude-sonnet-4-6")
+        self._field(self._cf, "Model",   "claude_model",  "claude-sonnet-4-20250514")
         self._note(self._cf, "Get key at: console.anthropic.com")
 
         # Groq
@@ -1447,9 +1527,48 @@ class SetupScreen(tk.Frame):
                                activebackground=C["accent2"], activeforeground="#fff")
         gm_menu.pack(side="left", fill="x", expand=True)
         tk.Label(self._gf,
-            text="  instant=fastest  |  70b=best quality  |  gemma/mixtral=alternatives",
+            text="  instant=fastest  |  70b=quality  |  gpt-oss=reasoning-capable",
             font=MONO8, bg=C["bg"], fg=C["fg2"]).pack(anchor="w", pady=(0, 4))
-        self._note(self._gf, "API key is set in section 03 below.")
+
+        self._groq_key_frame = tk.Frame(inner, bg=C["panel"], highlightthickness=1,
+                                        highlightbackground=C["border"])
+        self._groq_key_frame.pack(fill="x", pady=(8, 14))
+        tk.Label(self._groq_key_frame, text="GROQ API KEY", font=TITLE,
+                 bg=C["panel"], fg=C["fg"]).pack(anchor="w", padx=12, pady=(10, 2))
+        self._groq_key_reason = tk.Label(
+            self._groq_key_frame, text="", font=MONO8,
+            bg=C["panel"], fg=C["fg2"], justify="left")
+        self._groq_key_reason.pack(anchor="w", padx=12, pady=(0, 6))
+        key_row = tk.Frame(self._groq_key_frame, bg=C["panel"])
+        key_row.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Label(key_row, text=f"{'API Key':<14}", font=MONO9, bg=C["panel"], fg=C["fg2"],
+                 width=14, anchor="w").pack(side="left")
+        self._vars["groq_key"] = tk.StringVar(value=self.s.get("groq_key", ""))
+        groq_key_entry = tk.Entry(key_row, textvariable=self._vars["groq_key"], font=MONO9,
+                     bg=C["input_bg"], fg=C["input_fg"],
+                     insertbackground=C["accent"], relief="flat", bd=0,
+                     show="•", highlightthickness=1,
+                     highlightcolor=C["accent2"],
+                     highlightbackground=C["border"])
+        groq_key_entry.pack(side="left", fill="x", expand=True, ipady=6, padx=(0, 4))
+        shown = [False]
+        show_lbl = tk.Label(key_row, text=" show ", font=MONO8,
+                            bg=C["panel"], fg=C["accent"], cursor="hand2")
+        show_lbl.pack(side="left")
+        def toggle_groq_key(_=None):
+            shown[0] = not shown[0]
+            groq_key_entry.config(show="" if shown[0] else "•")
+            show_lbl.config(text=" hide " if shown[0] else " show ")
+        show_lbl.bind("<Button-1>", toggle_groq_key)
+        groq_link_row = tk.Frame(self._groq_key_frame, bg=C["panel"])
+        groq_link_row.pack(fill="x", padx=12, pady=(0, 10))
+        tk.Label(groq_link_row, text="No key yet?", font=MONO8,
+                 bg=C["panel"], fg=C["fg2"]).pack(side="left")
+        link = tk.Label(groq_link_row,
+            text="Create one at console.groq.com",
+            font=MONO8, bg=C["panel"], fg=C["accent"], cursor="hand2")
+        link.pack(side="left", padx=4)
+        link.bind("<Button-1>", lambda e: webbrowser.open("https://console.groq.com"))
 
         tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=14)
 
@@ -1478,19 +1597,8 @@ class SetupScreen(tk.Frame):
         self._groq_tr_frame.pack(fill="x")
 
         tk.Label(self._groq_tr_frame,
-            text="One Groq key handles transcription + Groq AI responses (same key).",
+            text="Uses the Groq API key above for cloud transcription.",
             font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(0, 4))
-        self._field(self._groq_tr_frame, "Groq API Key", "groq_key", "gsk_...", secret=True)
-
-        # Clickable signup link
-        signup_row = tk.Frame(self._groq_tr_frame, bg=C["bg"])
-        signup_row.pack(fill="x", pady=(0, 6))
-        tk.Label(signup_row, text="No account? →", font=MONO8, bg=C["bg"], fg=C["fg2"]).pack(side="left")
-        link = tk.Label(signup_row,
-            text="Create free Groq account (console.groq.com)",
-            font=MONO8, bg=C["bg"], fg=C["accent"], cursor="hand2")
-        link.pack(side="left", padx=4)
-        link.bind("<Button-1>", lambda e: webbrowser.open("https://console.groq.com"))
 
         # Groq Whisper model dropdown
         wm_row = tk.Frame(self._groq_tr_frame, bg=C["bg"])
@@ -1528,16 +1636,20 @@ class SetupScreen(tk.Frame):
         tk.Label(inner, text="  Language code: en, ar, fr, de, es, tr, zh ...",
             font=MONO8, bg=C["bg"], fg=C["fg2"]).pack(anchor="w", pady=(0, 4))
 
+        self._advanced_options = tk.Frame(inner, bg=C["bg"])
+        self._advanced_options.pack(fill="x")
+
         # Custom trigger keywords
-        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(8, 4))
-        self._section(inner, "03b  CUSTOM TRIGGER KEYWORDS  (optional)")
-        self._field(inner, "Keywords", "custom_keywords", "sprint, deploy, blockers")
-        tk.Label(inner,
+        tk.Frame(self._advanced_options, bg=C["border"], height=1).pack(fill="x", pady=(8, 4))
+        self._section(self._advanced_options, "03b  CUSTOM TRIGGER KEYWORDS  (optional)")
+        self._field(self._advanced_options, "Keywords", "custom_keywords", "sprint, deploy, blockers")
+        tk.Label(self._advanced_options,
             text="  Comma-separated. AI responds whenever these words appear in the transcript.\n"
                  "  Add project names, team terms, or anything you want to always catch.",
             font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(0, 4))
 
         self._refresh_transcription()
+        self._refresh_groq_key_frame()
 
         tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=14)
 
@@ -1576,7 +1688,7 @@ class SetupScreen(tk.Frame):
             self._win_dev_status = tk.Label(inner, text="", font=MONO8, bg=C["bg"], fg=C["fg2"])
             self._win_dev_status.pack(anchor="w", pady=(2, 0))
 
-            self._note(inner,
+            self._collapsible_note(inner, "Show Windows audio setup steps",
                 "Option A — VB-Cable (cleanest, captures exactly what Zoom plays):\n"
                 "  1. Install from vb-audio.com/Cable  (free)\n"
                 "  2. Zoom Settings → Audio → Speaker → CABLE Input\n"
@@ -1616,7 +1728,7 @@ class SetupScreen(tk.Frame):
             self._discover_btn.pack(side="left")
             _hover_btn(self._discover_btn, "#1e1e1e", C["fg"])
 
-            self._note(inner,
+            self._collapsible_note(inner, "Show Linux audio setup steps",
                 "Linux setup (run once in terminal):\n"
                 "  pactl load-module module-null-sink sink_name=zoom_capture sink_properties=device.description=ZoomCapture\n"
                 "  pactl load-module module-loopback source=zoom_capture.monitor\n"
@@ -1646,16 +1758,16 @@ class SetupScreen(tk.Frame):
                                      highlightthickness=0, bd=0)
         self._vol_bar = self._vol_canvas.create_rectangle(0, 0, 0, 12, fill=C["success"], width=0)
 
-        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=14)
+        tk.Frame(self._advanced_options, bg=C["border"], height=1).pack(fill="x", pady=14)
 
-        # Section 05 — Interview Mode
-        self._section(inner, "05  INTERVIEW MODE")
+        # Section 05 — Practice assist mode
+        self._section(self._advanced_options, "05  PRACTICE ASSIST MODE")
 
-        im_row = tk.Frame(inner, bg=C["bg"])
+        im_row = tk.Frame(self._advanced_options, bg=C["bg"])
         im_row.pack(fill="x", pady=(0, 6))
         self._vars["interview_mode"] = tk.BooleanVar(value=bool(self.s.get("interview_mode", False)))
         im_chk = tk.Checkbutton(im_row,
-            text="Enable Interview Mode  (AI suggests answers instead of summarising)",
+            text="Enable Practice Assist  (mock interviews or explicitly permitted support)",
             variable=self._vars["interview_mode"],
             font=MONO9, bg=C["bg"], fg=C["fg"],
             activebackground=C["bg"], activeforeground=C["accent"],
@@ -1663,11 +1775,11 @@ class SetupScreen(tk.Frame):
             command=self._refresh_interview_mode)
         im_chk.pack(anchor="w")
 
-        self._im_frame = tk.Frame(inner, bg=C["bg"])
+        self._im_frame = tk.Frame(self._advanced_options, bg=C["bg"])
         self._im_frame.pack(fill="x")
 
         tk.Label(self._im_frame,
-            text="Your background  (paste resume / skills / years of experience — the more detail, the better answers)",
+            text="Your background  (resume / skills / experience — answers stay grounded in this)",
             font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(4, 2))
         self._im_bg_text = tk.Text(self._im_frame,
             font=MONO8, bg=C["input_bg"], fg=C["input_fg"],
@@ -1679,7 +1791,7 @@ class SetupScreen(tk.Frame):
         self._im_bg_text.insert("1.0", self.s.get("interview_background", ""))
 
         tk.Label(self._im_frame,
-            text="Role & company  (job title + company name + 2-3 sentences from the job description)",
+            text="Role context  (job title + company + 2-3 sentences from the job description)",
             font=MONO8, bg=C["bg"], fg=C["fg2"], justify="left").pack(anchor="w", pady=(0, 2))
         self._im_role_text = tk.Text(self._im_frame,
             font=MONO8, bg=C["input_bg"], fg=C["input_fg"],
@@ -1691,17 +1803,16 @@ class SetupScreen(tk.Frame):
         self._im_role_text.insert("1.0", self.s.get("interview_role", ""))
 
         self._note(self._im_frame,
-            "Audio tip: make sure you are capturing the INTERVIEWER's audio only.\n"
-            "  Best: VB-Cable or Stereo Mix — captures speaker output, not your mic.\n"
-            "  Do NOT use microphone mode — it would pick up your own answers too.\n"
-            "AI will respond to EVERYTHING the interviewer says and suggest what to say.")
+            "Use for practice, mock interviews, accessibility support, or situations where assistance is allowed.\n"
+            "Answers are drafted only from the background you provide.\n"
+            "For ordinary meetings, keep this off and use Notes for summaries/actions.")
 
         self._refresh_interview_mode()
 
-        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=14)
+        tk.Frame(self._advanced_options, bg=C["border"], height=1).pack(fill="x", pady=14)
 
         # Section 06 — Screen Watch
-        self._section(inner, "06  SCREEN WATCH  (real-time vision AI)")
+        self._section(self._advanced_options, "06  SCREEN WATCH  (real-time vision AI)")
         cap_avail = screen_capture_available()
         cap_note = (
             "Captures your screen periodically and sends it to a vision AI.\n"
@@ -1712,11 +1823,11 @@ class SetupScreen(tk.Frame):
             "Requires: Claude or Ollama with a vision model (e.g. llava).\n"
             f"Capture library: {'mss ✓' if _MSS_AVAILABLE else 'Pillow ImageGrab ✓'}"
         )
-        tk.Label(inner, text=cap_note, font=MONO8, bg=C["bg"],
+        tk.Label(self._advanced_options, text=cap_note, font=MONO8, bg=C["bg"],
                  fg=C["success"] if cap_avail else C["fg2"],
                  justify="left").pack(anchor="w", pady=(0, 6))
 
-        si_row = tk.Frame(inner, bg=C["bg"])
+        si_row = tk.Frame(self._advanced_options, bg=C["bg"])
         si_row.pack(fill="x", pady=4)
         tk.Label(si_row, text=f"{'Interval (sec)':<14}", font=MONO9, bg=C["bg"], fg=C["fg2"],
                  width=14, anchor="w").pack(side="left")
@@ -1765,6 +1876,58 @@ class SetupScreen(tk.Frame):
         tk.Label(f, text=text, font=MONO8, bg=C["bg"], fg=C["accent"]).pack(anchor="w")
         tk.Frame(f, bg=C["accent2"], height=1).pack(fill="x", pady=(3, 0))
 
+    def _quick_start(self, p):
+        box = tk.Frame(p, bg=C["panel"], highlightthickness=1,
+                       highlightbackground=C["border"])
+        box.pack(fill="x", pady=(12, 14))
+
+        left = tk.Frame(box, bg=C["panel"])
+        left.pack(side="left", fill="both", expand=True, padx=12, pady=10)
+        tk.Label(left, text="Recommended first run", font=TITLE,
+                 bg=C["panel"], fg=C["fg"]).pack(anchor="w")
+        tk.Label(left,
+                 text="Local-first setup: built-in AI, local transcription, then test audio.",
+                 font=MONO8, bg=C["panel"], fg=C["fg2"],
+                 justify="left").pack(anchor="w", pady=(2, 0))
+
+        btns = tk.Frame(box, bg=C["panel"])
+        btns.pack(side="right", padx=12, pady=10)
+        local_btn = tk.Button(btns, text="Use local-first",
+            font=MONO9, bg="#08251c", fg=C["success"],
+            activebackground="#0d3a2c", activeforeground=C["success"],
+            relief="flat", bd=0, cursor="hand2", padx=12, pady=7,
+            command=lambda: self._apply_preset("local"))
+        local_btn.pack(side="left", padx=(0, 6))
+        _hover_btn(local_btn, "#0d3a2c", C["success"])
+        _tip(local_btn, "Built-in AI + Local Whisper. Most private path.")
+
+        cloud_btn = tk.Button(btns, text="Use quick cloud",
+            font=MONO9, bg=C["panel2"], fg=C["accent"],
+            activebackground=C["border"], activeforeground=C["accent"],
+            relief="flat", bd=0, cursor="hand2", padx=12, pady=7,
+            command=lambda: self._apply_preset("cloud"))
+        cloud_btn.pack(side="left")
+        _hover_btn(cloud_btn, C["border"], C["accent"])
+        _tip(cloud_btn, "Groq AI + Groq Whisper. Fastest to try with a Groq key.")
+
+    def _apply_preset(self, preset):
+        if preset == "local":
+            values = {"backend": "builtin", "transcription": "local"}
+            msg = "Local-first preset selected. Install faster-whisper if needed, then test audio."
+        else:
+            values = {"backend": "groq", "transcription": "groq"}
+            msg = "Quick cloud preset selected. Paste your key in GROQ API KEY, then test connection."
+
+        for key, value in values.items():
+            if key in self._vars:
+                self._vars[key].set(value)
+        if hasattr(self, "_refresh"):
+            self._refresh()
+        if hasattr(self, "_refresh_transcription"):
+            self._refresh_transcription()
+        if hasattr(self, "_status"):
+            self._status.config(text=msg, fg=C["warn"])
+
     def _field(self, p, label, key, placeholder="", secret=False):
         row = tk.Frame(p, bg=C["bg"])
         row.pack(fill="x", pady=4)
@@ -1792,6 +1955,33 @@ class SetupScreen(tk.Frame):
     def _note(self, p, text):
         tk.Label(p, text=text, font=MONO8, bg=C["bg"], fg=C["fg2"],
                  justify="left", anchor="w").pack(anchor="w", pady=(0, 8))
+
+    def _collapsible_note(self, p, title, text, initially_open=False):
+        wrap = tk.Frame(p, bg=C["bg"])
+        wrap.pack(fill="x", pady=(0, 8))
+        open_state = [initially_open]
+        body = tk.Frame(wrap, bg=C["bg"])
+        lbl = tk.Label(body, text=text, font=MONO8, bg=C["bg"], fg=C["fg2"],
+                       justify="left", anchor="w")
+        lbl.pack(anchor="w", pady=(4, 0))
+
+        def toggle():
+            open_state[0] = not open_state[0]
+            btn.config(text=("▾  " if open_state[0] else "▸  ") + title)
+            if open_state[0]:
+                body.pack(fill="x")
+            else:
+                body.pack_forget()
+
+        btn = tk.Button(wrap,
+            text=("▾  " if initially_open else "▸  ") + title,
+            font=MONO8, bg=C["bg"], fg=C["accent"],
+            activebackground=C["bg"], activeforeground=C["fg"],
+            relief="flat", bd=0, cursor="hand2", padx=0, pady=2,
+            command=toggle)
+        btn.pack(anchor="w")
+        if initially_open:
+            body.pack(fill="x")
 
     def _check_builtin_status(self):
         def check():
@@ -1976,6 +2166,7 @@ class SetupScreen(tk.Frame):
             f.pack_forget()
         {"builtin": self._bif, "demo": self._df, "ollama": self._of,
          "claude": self._cf, "groq": self._gf}[b].pack(in_=self._backend_container, fill="x")
+        self._refresh_groq_key_frame()
 
     def _refresh_transcription(self):
         t = self._vars["transcription"].get()
@@ -1985,6 +2176,31 @@ class SetupScreen(tk.Frame):
             self._groq_tr_frame.pack(fill="x")
         else:
             self._local_tr_frame.pack(fill="x")
+        self._refresh_groq_key_frame()
+
+    def _refresh_groq_key_frame(self):
+        if not hasattr(self, "_groq_key_frame"):
+            return
+        backend = self._vars.get("backend").get() if "backend" in self._vars else self.s.get("backend")
+        transcription = (
+            self._vars.get("transcription").get()
+            if "transcription" in self._vars
+            else self.s.get("transcription")
+        )
+        needs_ai = backend == "groq"
+        needs_transcription = transcription == "groq"
+        if needs_ai or needs_transcription:
+            reasons = []
+            if needs_transcription:
+                reasons.append("Cloud transcription")
+            if needs_ai:
+                reasons.append("Groq AI replies")
+            self._groq_key_reason.config(
+                text="Paste your gsk_... key here. Used for: " + " + ".join(reasons) + ".")
+            if not self._groq_key_frame.winfo_manager():
+                self._groq_key_frame.pack(fill="x", pady=(8, 14), after=self._backend_section)
+        else:
+            self._groq_key_frame.pack_forget()
 
     def _build_whisper_model_table(self, parent):
         """Per-model install / delete table for local Whisper."""
@@ -2158,9 +2374,9 @@ class SetupScreen(tk.Frame):
         using_local = s.get("transcription", "groq") == "local"
         # Groq key required only when using Groq transcription or Groq AI backend
         if not using_local and b != "demo" and not s.get("groq_key"):
-            return "Groq API key is required (section 03). Free at console.groq.com"
+            return "Groq API key is required. Paste it in the GROQ API KEY box."
         if using_local and b == "groq" and not s.get("groq_key"):
-            return "Groq API key is required for the Groq AI backend (section 03)."
+            return "Groq API key is required for Groq AI replies. Paste it in the GROQ API KEY box."
         if b == "claude" and not s.get("anthropic_key"):
             return "Anthropic API key is required."
         if using_local and not faster_whisper_installed():
@@ -2316,6 +2532,9 @@ class OverlayScreen(tk.Frame):
         self.on_settings       = on_settings
         self.on_toggle_capture = on_toggle_capture
         self._latest_notes     = ""
+        self._chat_items       = []
+        self._chat_filter      = "All"
+        self._filter_buttons   = {}
         self._build()
 
     def _build(self):
@@ -2354,13 +2573,11 @@ class OverlayScreen(tk.Frame):
             lambda e: self.set_status(privacy_tip, privacy_fg))
         privacy_badge.bind(
             "<Leave>",
-            lambda e: self.set_status(
-                "Listening..." if _listen_event.is_set() else "idle",
-                C["accent"] if _listen_event.is_set() else C["fg2"]))
+            lambda e: self.set_status(*live_status_args()))
 
-        # Interview Mode indicator badge
+        # Practice Assist indicator badge
         if self.s.get("interview_mode"):
-            tk.Label(hdr, text="  🎯 INTERVIEW  ", font=MONO7,
+            tk.Label(hdr, text="  PRACTICE  ", font=MONO7,
                      bg="#1a0a00", fg="#fb923c", padx=2, pady=3).pack(side="left", padx=2)
 
         # Right-side controls
@@ -2371,6 +2588,7 @@ class OverlayScreen(tk.Frame):
         settings_btn.config(command=self.on_settings)
         settings_btn.pack(side="right", padx=2)
         _hover_btn(settings_btn, C["panel2"], C["accent"])
+        _tip(settings_btn, "Settings")
 
         if self.on_toggle_capture and sys.platform == "win32":
             self._capture_btn = tk.Button(
@@ -2382,6 +2600,7 @@ class OverlayScreen(tk.Frame):
                 command=lambda: self.on_toggle_capture(self._capture_btn))
             self._capture_btn.pack(side="right", padx=6)
             _hover_btn(self._capture_btn, C["border"], C["warn"])
+            _tip(self._capture_btn, "Toggle whether Windows screen capture can see this overlay.")
 
         # Animated status dot
         self.status_lbl = tk.Label(hdr, text="⬤  idle", font=MONO8,
@@ -2396,8 +2615,17 @@ class OverlayScreen(tk.Frame):
         chat_outer = tk.Frame(self, bg=C["border"], padx=1, pady=1)
         chat_outer.pack(fill="both", expand=True, padx=14, pady=(10, 6))
 
+        chat_inner = tk.Frame(chat_outer, bg=C["panel"])
+        chat_inner.pack(fill="both", expand=True)
+
+        filter_bar = tk.Frame(chat_inner, bg=C["panel"], pady=6)
+        filter_bar.pack(fill="x", padx=8)
+        tk.Label(filter_bar, text="VIEW", font=MONO7,
+                 bg=C["panel"], fg=C["fg2"]).pack(side="left", padx=(0, 6))
+        self._build_filter_tabs(filter_bar)
+
         self.chat = scrolledtext.ScrolledText(
-            chat_outer, bg=C["panel"], fg=C["fg"],
+            chat_inner, bg=C["panel"], fg=C["fg"],
             font=MONO, relief="flat", bd=0,
             wrap="word", state="disabled", cursor="arrow",
             selectbackground="#1a3a50",
@@ -2405,14 +2633,15 @@ class OverlayScreen(tk.Frame):
         )
         self.chat.pack(fill="both", expand=True)
 
-        self.chat.tag_config("them",     foreground=C["them"])
-        self.chat.tag_config("them_lbl", foreground="#334155", font=MONO7)
-        self.chat.tag_config("ai",       foreground=C["ai"])
-        self.chat.tag_config("ai_lbl",   foreground=C["accent2"], font=MONO7)
-        self.chat.tag_config("error",    foreground=C["error"], font=(*MONO8[:1], MONO8[1], "bold"))
-        self.chat.tag_config("sys",      foreground="#2a3a4a", font=MONO7)
-        self.chat.tag_config("divider",  foreground="#13131e")
-        self.chat.tag_config("ts",       foreground="#1e2d3d", font=MONO7)
+        self.chat.tag_config("them",     foreground=C["them"], lmargin1=8, lmargin2=8, spacing3=4)
+        self.chat.tag_config("them_lbl", foreground="#64748b", font=MONO7)
+        self.chat.tag_config("ai",       foreground=C["ai"], lmargin1=8, lmargin2=8, spacing3=4)
+        self.chat.tag_config("ai_lbl",   foreground="#38bdf8", font=MONO7)
+        self.chat.tag_config("error",    foreground=C["error"], font=(*MONO8[:1], MONO8[1], "bold"),
+                             lmargin1=8, lmargin2=8, spacing3=4)
+        self.chat.tag_config("sys",      foreground="#64748b", font=MONO7)
+        self.chat.tag_config("divider",  foreground="#253044")
+        self.chat.tag_config("ts",       foreground="#64748b", font=MONO7)
 
         # #2 Right-click context menu for copying text
         self._ctx_menu = tk.Menu(self.chat, tearoff=0, bg=C["panel"], fg=C["fg"],
@@ -2426,7 +2655,7 @@ class OverlayScreen(tk.Frame):
         self._ctx_menu.add_command(label="Copy last AI reply",
                                    command=self._copy_last_ai)
         self._ctx_menu.add_separator()
-        self._ctx_menu.add_command(label="Save transcript…", command=self.save_transcript)
+        self._ctx_menu.add_command(label="Save session log...", command=self.save_transcript)
         self.chat.bind("<Button-3>", lambda e: self._ctx_menu.tk_popup(e.x_root, e.y_root))
 
         # ── Controls row ──────────────────────────────────────────────────────
@@ -2442,6 +2671,7 @@ class OverlayScreen(tk.Frame):
             command=self.toggle_listening)
         self.toggle_btn.pack(side="left")
         _hover_btn(self.toggle_btn, "#0a3a3e", C["accent"])
+        _tip(self.toggle_btn, "Start or stop live meeting transcription.")
 
         # Group B — log controls (subtle separator via padx gap)
         tk.Frame(ctrl, bg=C["border"], width=1).pack(side="left", fill="y", padx=(10, 10), pady=4)
@@ -2453,14 +2683,16 @@ class OverlayScreen(tk.Frame):
                   command=self.clear)
         clear_btn.pack(side="left")
         _hover_btn(clear_btn, "#2a0a0a", C["error"])
+        _tip(clear_btn, "Clear the visible transcript and session context.")
 
-        save_btn = tk.Button(ctrl, text="⬇ Save",
+        save_btn = tk.Button(ctrl, text="TXT",
                   font=MONO9, bg=C["panel2"], fg=C["fg2"],
                   activebackground=C["border"], activeforeground=C["fg"],
                   relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self.save_transcript)
         save_btn.pack(side="left", padx=(4, 0))
         _hover_btn(save_btn, C["border"], C["fg"])
+        _tip(save_btn, "Save the full session log as a text file.")
 
         self._notes_btn = tk.Button(ctrl, text="Notes",
                   font=MONO9, bg=C["panel2"], fg=C["success"],
@@ -2469,23 +2701,26 @@ class OverlayScreen(tk.Frame):
                   command=self._generate_meeting_notes)
         self._notes_btn.pack(side="left", padx=(4, 0))
         _hover_btn(self._notes_btn, C["border"], C["success"])
+        _tip(self._notes_btn, "Generate summary, decisions, actions, and open questions.")
 
-        export_md_btn = tk.Button(ctrl, text="MD",
+        export_md_btn = tk.Button(ctrl, text="Export",
                   font=MONO9, bg=C["panel2"], fg=C["fg2"],
                   activebackground=C["border"], activeforeground=C["fg"],
-                  relief="flat", bd=0, cursor="hand2", padx=10, pady=8,
+                  relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self.export_meeting_markdown)
         export_md_btn.pack(side="left", padx=(4, 0))
         _hover_btn(export_md_btn, C["border"], C["fg"])
+        _tip(export_md_btn, "Export structured meeting notes as Markdown.")
 
         self._autoscroll = [True]
-        self._scroll_btn = tk.Button(ctrl, text="⬇ Auto",
+        self._scroll_btn = tk.Button(ctrl, text="Auto-scroll",
                   font=MONO9, bg=C["panel2"], fg=C["accent"],
                   activebackground=C["border"], activeforeground=C["accent"],
-                  relief="flat", bd=0, cursor="hand2", padx=10, pady=8,
+                  relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self._toggle_autoscroll)
         self._scroll_btn.pack(side="left", padx=(4, 0))
         _hover_btn(self._scroll_btn, C["border"], C["accent"])
+        _tip(self._scroll_btn, "Keep the latest transcript visible.")
 
         # Group C — screen watch (subtle separator)
         tk.Frame(ctrl, bg=C["border"], width=1).pack(side="left", fill="y", padx=(10, 10), pady=4)
@@ -2493,31 +2728,33 @@ class OverlayScreen(tk.Frame):
         sw_frame = tk.Frame(ctrl, bg=C["bg"])
         sw_frame.pack(side="left")
 
-        self._screen_btn = tk.Button(sw_frame, text="👁 Screen Watch",
+        self._screen_btn = tk.Button(sw_frame, text="Watch",
                   font=MONO9, bg="#0a001a", fg="#c084fc",
                   activebackground="#160028", activeforeground="#c084fc",
                   relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self._toggle_screen_watch)
         self._screen_btn.pack(side="left")
         _hover_btn(self._screen_btn, "#160028", "#c084fc")
+        _tip(self._screen_btn, "Start or stop periodic screen analysis.")
 
-        self._region_btn = tk.Button(sw_frame, text="📐",
+        self._region_btn = tk.Button(sw_frame, text="Region",
                   font=MONO9, bg=C["panel2"], fg=C["fg2"],
                   activebackground=C["border"], activeforeground=C["fg"],
-                  relief="flat", bd=0, cursor="hand2", padx=8, pady=8,
+                  relief="flat", bd=0, cursor="hand2", padx=12, pady=8,
                   command=self._pick_region)
         self._region_btn.pack(side="left", padx=(3, 0))
         _hover_btn(self._region_btn, C["border"], C["fg"])
+        _tip(self._region_btn, "Choose which screen area to watch.")
 
         self._region_lbl = tk.Label(sw_frame, text="full screen",
-                  font=MONO7, bg=C["bg"], fg="#334466")
+                  font=MONO7, bg=C["bg"], fg="#64748b")
         self._region_lbl.pack(side="left", padx=4)
 
         # Group D — opacity (right-aligned)
         opacity_frame = tk.Frame(ctrl, bg=C["bg"])
         opacity_frame.pack(side="right")
         tk.Label(opacity_frame, text="OPACITY", font=MONO7,
-                 bg=C["bg"], fg="#2a2a44").pack(side="left", padx=(0, 4))
+                 bg=C["bg"], fg="#64748b").pack(side="left", padx=(0, 4))
         self.opacity_var = tk.DoubleVar(value=self.s.get("opacity", 0.94))
 
         def _on_opacity(v):
@@ -2552,6 +2789,7 @@ class OverlayScreen(tk.Frame):
                   relief="flat", bd=0, cursor="hand2", padx=14, pady=6)
         send_btn.pack(side="top", fill="x")
         _hover_btn(send_btn, C["accent"], "#000000")
+        _tip(send_btn, "Send the typed note or question.")
 
         paste_btn = tk.Button(btn_col, text="📋",
                   font=MONO8,
@@ -2560,6 +2798,7 @@ class OverlayScreen(tk.Frame):
                   relief="flat", bd=0, cursor="hand2", padx=14, pady=4)
         paste_btn.pack(side="top", fill="x")
         _hover_btn(paste_btn, C["border"], C["fg"])
+        _tip(paste_btn, "Paste clipboard text into the input.")
 
         clr_btn = tk.Button(btn_col, text="✕",
                   font=MONO8,
@@ -2568,6 +2807,7 @@ class OverlayScreen(tk.Frame):
                   relief="flat", bd=0, cursor="hand2", padx=14, pady=4)
         clr_btn.pack(side="top", fill="x")
         _hover_btn(clr_btn, C["border"], C["error"])
+        _tip(clr_btn, "Clear the input box.")
 
         # Multi-line text widget — supports code paste
         self._manual_entry = tk.Text(
@@ -2639,8 +2879,8 @@ class OverlayScreen(tk.Frame):
         ))
 
         # Keyboard hint
-        tk.Label(self, text="Enter = send  |  Shift+Enter = newline  |  Notes = summary/actions  |  MD = export",
-                 font=MONO7, bg=C["bg"], fg="#1e2d3d", anchor="e"
+        tk.Label(self, text="Enter = send  |  Shift+Enter = newline",
+                 font=MONO7, bg=C["bg"], fg="#64748b", anchor="e"
                  ).pack(fill="x", padx=16, pady=(0, 2))
 
         # #10 Session stats footer
@@ -2656,35 +2896,123 @@ class OverlayScreen(tk.Frame):
         privacy_name, _, privacy_tip = privacy_mode_label(self.s)
         self.append_message(
             "SYSTEM",
-            f"{privacy_name}: {privacy_tip}. Use Notes for summary/actions and MD to export.",
+            f"{privacy_name}: {privacy_tip}. Use Notes for summary/actions and Export for Markdown.",
             "ai",
         )
 
+    def _build_filter_tabs(self, parent):
+        filters = [
+            ("All", "Show everything"),
+            ("Transcript", "Show captured speech and typed user notes"),
+            ("AI", "Show AI replies and screen insights"),
+            ("Notes", "Show generated meeting notes"),
+            ("Errors", "Show warnings and errors"),
+        ]
+        for name, tip in filters:
+            btn = tk.Button(parent, text=name,
+                font=MONO8, bg=C["panel2"], fg=C["fg2"],
+                activebackground=C["border"], activeforeground=C["fg"],
+                relief="flat", bd=0, cursor="hand2", padx=10, pady=4,
+                command=lambda n=name: self._set_chat_filter(n))
+            btn.pack(side="left", padx=(0, 4))
+            _hover_btn(btn, C["border"], C["fg"])
+            btn.bind("<Leave>", lambda _e: self._refresh_filter_tabs(), add="+")
+            _tip(btn, tip)
+            self._filter_buttons[name] = btn
+        self._refresh_filter_tabs()
+
+    def _set_chat_filter(self, name):
+        self._chat_filter = name
+        self._refresh_filter_tabs()
+        self._render_chat_log()
+
+    def _refresh_filter_tabs(self):
+        for name, btn in self._filter_buttons.items():
+            active = name == self._chat_filter
+            count = sum(1 for item in self._chat_items if self._chat_item_visible_for(item, name))
+            btn.config(
+                text=f"{name} {count}" if count else name,
+                bg=C["accent2"] if active else C["panel2"],
+                fg="#ffffff" if active else C["fg2"],
+                activebackground=C["accent"] if active else C["border"],
+                activeforeground="#000000" if active else C["fg"],
+            )
+
+    def _chat_item_visible_for(self, item, filter_name):
+        f = filter_name
+        if f == "All":
+            return True
+        label = item["label"].upper()
+        kind = item["kind"]
+        if f == "Transcript":
+            return kind == "them"
+        if f == "AI":
+            return kind == "ai" and not label.startswith(("SYSTEM", "NOTES"))
+        if f == "Notes":
+            return label.startswith("NOTES")
+        if f == "Errors":
+            return kind == "error" or label.startswith("ERROR")
+        return True
+
+    def _chat_item_visible(self, item):
+        return self._chat_item_visible_for(item, self._chat_filter)
+
+    def _chat_tags_for_kind(self, kind):
+        if kind == "them":
+            return "them_lbl", "them"
+        if kind == "ai":
+            return "ai_lbl", "ai"
+        return "sys", "error"
+
+    def _insert_chat_item(self, item):
+        lbl_tag, txt_tag = self._chat_tags_for_kind(item["kind"])
+        self.chat.insert("end", "\n")
+        self.chat.insert("end", f" {item['label']}  ", lbl_tag)
+        self.chat.insert("end", f"{item['ts']}\n", "ts")
+        self.chat.insert("end", f" {item['text']}\n", txt_tag)
+        self.chat.insert("end", "  " + "-" * 52 + "\n", "divider")
+
+    def _render_chat_log(self):
+        self.chat.config(state="normal")
+        self.chat.delete("1.0", "end")
+        for item in self._chat_items:
+            if self._chat_item_visible(item):
+                self._insert_chat_item(item)
+        self.chat.config(state="disabled")
+        if self._autoscroll[0]:
+            self.chat.see("end")
+
+    def _format_chat_log(self, visible_only=False):
+        rows = []
+        for item in self._chat_items:
+            if visible_only and not self._chat_item_visible(item):
+                continue
+            rows.append(f"{item['ts']} {item['label']}\n{item['text']}")
+        return "\n\n".join(rows).strip()
+
     def append_message(self, label, text, kind="them"):
         def _w():
-            ts = time.strftime("%H:%M:%S")
-            self.chat.config(state="normal")
-            if kind == "them":
-                lbl_tag, txt_tag = "them_lbl", "them"
-            elif kind == "ai":
-                lbl_tag, txt_tag = "ai_lbl", "ai"
-            else:
-                lbl_tag, txt_tag = "sys", "error"
-            self.chat.insert("end", "\n")
-            self.chat.insert("end", f" {label}  ", lbl_tag)
-            self.chat.insert("end", f"{ts}\n", "ts")
-            self.chat.insert("end", f" {text}\n", txt_tag)
-            self.chat.insert("end", "  " + "─" * 52 + "\n", "divider")
-            self.chat.config(state="disabled")
-            if self._autoscroll[0]:   # #3 only scroll if auto-scroll is on
-                self.chat.see("end")
+            item = {
+                "label": label,
+                "text": str(text),
+                "kind": kind,
+                "ts": time.strftime("%H:%M:%S"),
+            }
+            self._chat_items.append(item)
+            self._refresh_filter_tabs()
+            if self._chat_item_visible(item):
+                self.chat.config(state="normal")
+                self._insert_chat_item(item)
+                self.chat.config(state="disabled")
+                if self._autoscroll[0]:
+                    self.chat.see("end")
         self.after(0, _w)
 
     def _toggle_autoscroll(self):
         self._autoscroll[0] = not self._autoscroll[0]
         on = self._autoscroll[0]
         self._scroll_btn.config(
-            text="⬇ AUTO" if on else "⏸ SCROLL",
+            text="Auto-scroll" if on else "Paused",
             fg=C["accent"] if on else C["warn"],
         )
         if on:
@@ -2692,11 +3020,11 @@ class OverlayScreen(tk.Frame):
 
     def save_transcript(self):
         """#1 Export chat contents to a timestamped .txt file."""
-        content = self.chat.get("1.0", "end").strip()
+        content = self._format_chat_log()
         if not content:
             messagebox.showinfo("Nothing to save", "The transcript is empty.")
             return
-        default_name = f"transcript_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        default_name = f"session_log_{time.strftime('%Y%m%d_%H%M%S')}.txt"
         path = filedialog.asksaveasfilename(
             defaultextension=".txt",
             filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
@@ -2710,7 +3038,7 @@ class OverlayScreen(tk.Frame):
     def export_meeting_markdown(self):
         """Export structured notes plus raw transcript as Markdown."""
         transcript_lines = get_transcript_lines()
-        chat_content = self.chat.get("1.0", "end").strip()
+        chat_content = self._format_chat_log()
         if not transcript_lines and not chat_content:
             messagebox.showinfo("Nothing to export", "The meeting transcript is empty.")
             return
@@ -2772,9 +3100,8 @@ class OverlayScreen(tk.Frame):
                 _stats_inc("errors")
                 self.append_message("ERROR", f"Meeting notes failed: {e}", "error")
             finally:
-                live = _listen_event.is_set()
                 self.after(0, lambda: self._notes_btn.config(state="normal", text="Notes"))
-                self.set_status("Listening..." if live else "idle", C["accent"] if live else C["fg2"])
+                self.set_status(*live_status_args())
                 self.update_stats()
 
         threading.Thread(target=run, daemon=True).start()
@@ -2814,9 +3141,8 @@ class OverlayScreen(tk.Frame):
         self.after(0, _apply)
 
     def clear(self):
-        self.chat.config(state="normal")
-        self.chat.delete("1.0", "end")
-        self.chat.config(state="disabled")
+        self._chat_items.clear()
+        self._render_chat_log()
         with _history_lock:
             conversation_history.clear()
         _stats_reset()
@@ -2883,8 +3209,7 @@ class OverlayScreen(tk.Frame):
             except Exception as e:
                 _stats_inc("errors")
                 self.append_message("ERROR", str(e), "error")
-            live = _listen_event.is_set()
-            self.set_status("Listening..." if live else "idle", C["accent"] if live else C["fg2"])
+            self.set_status(*live_status_args())
             self.update_stats()
 
         threading.Thread(target=run, daemon=True).start()
@@ -2932,7 +3257,7 @@ class OverlayScreen(tk.Frame):
         threading.Thread(target=screen_watch_loop, args=(self.s, self), daemon=True).start()
 
         self._screen_btn.config(
-            text="■ STOP WATCHING",
+            text="Stop watch",
             bg="#1a0030", fg="#ff44cc",
             activebackground="#250040", activeforeground="#ff44cc",
         )
@@ -2947,7 +3272,7 @@ class OverlayScreen(tk.Frame):
     def _stop_screen_watch(self):
         _screen_watch_event.clear()
         self._screen_btn.config(
-            text="👁 WATCH SCREEN",
+            text="Watch",
             bg="#0a001a", fg="#c084fc",
             activebackground="#160028", activeforeground="#c084fc",
         )
@@ -2978,7 +3303,7 @@ class OverlayScreen(tk.Frame):
                 hint = "Run the pactl setup commands first (shown in the Audio Device section of settings)."
             self.append_message("ERROR",
                     f"Device '{self.s['device_name']}' not found.\n{hint}", "error")
-            self.toggle_btn.config(text="▶  START LISTENING", state="normal",
+            self.toggle_btn.config(text="▶  START  (Ctrl+L)", state="normal",
                                    bg="#05282a", fg=C["accent"],
                                    activebackground="#0a3a3e", activeforeground=C["accent"])
             return
@@ -3001,8 +3326,8 @@ class OverlayScreen(tk.Frame):
                          daemon=True).start()
 
         self.toggle_btn.config(text="■  STOP  (Ctrl+L)", state="normal",
-                               bg="#2a0a0a", fg="#ff4444",
-                               activebackground="#3d0d0d", activeforeground="#ff4444")
+                               bg="#3a1620", fg=C["error"],
+                               activebackground="#4a1f2a", activeforeground=C["error"])
         self.set_status("Listening...", C["accent"])
         tr_type = "Local Whisper" if self.s.get("transcription") == "local" else "Groq Whisper"
         self.append_message("SYSTEM",
@@ -3020,10 +3345,10 @@ class OverlayScreen(tk.Frame):
             except Exception as e:
                 self.append_message("ERROR", f"Audio stream stop failed: {e}", "error")
             stream = None
-        self.toggle_btn.config(text="▶  START LISTENING  (Ctrl+L)",
+        self.toggle_btn.config(text="▶  START  (Ctrl+L)",
                                bg="#05282a", fg=C["accent"],
                                activebackground="#0a3a3e", activeforeground=C["accent"])
-        self._screen_btn.config(text="👁 WATCH SCREEN", bg="#0a001a", fg="#c084fc")
+        self._screen_btn.config(text="Watch", bg="#0a001a", fg="#c084fc")
         self.set_status("Stopped", C["fg2"])
         self.append_message("SYSTEM", "Stopped.", "ai")
 

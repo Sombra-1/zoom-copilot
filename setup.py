@@ -29,15 +29,15 @@ from tkinter import scrolledtext
 
 # ── Theme (matches main app) ──────────────────────────────────────────────────
 C = {
-    "bg":      "#0a0a0a",
-    "panel":   "#111111",
-    "border":  "#1e1e1e",
-    "accent":  "#00e5ff",
-    "success": "#00ff88",
-    "error":   "#ff4444",
-    "warn":    "#ffaa00",
-    "fg":      "#dddddd",
-    "fg2":     "#555555",
+    "bg":      "#0f1218",
+    "panel":   "#151a23",
+    "border":  "#2a3442",
+    "accent":  "#38bdf8",
+    "success": "#34d399",
+    "error":   "#fb7185",
+    "warn":    "#fbbf24",
+    "fg":      "#e2e8f0",
+    "fg2":     "#94a3b8",
 }
 MONO  = ("Consolas", 10)
 MONO9 = ("Consolas", 9)
@@ -105,7 +105,7 @@ def find_main_app():
 class SetupApp:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Zoom Co-Pilot — Setup")
+        self.root.title("Open Meeting Copilot — Setup")
         self.root.configure(bg=C["bg"])
         self.root.geometry("480x700+120+80")
         self.root.resizable(False, False)
@@ -122,7 +122,7 @@ class SetupApp:
         tk.Label(hdr, text="◈", font=("Consolas", 28), bg=C["bg"], fg=C["accent"]).pack(side="left")
         tf = tk.Frame(hdr, bg=C["bg"])
         tf.pack(side="left", padx=10)
-        tk.Label(tf, text="ZOOM CO-PILOT SETUP", font=BIG, bg=C["bg"], fg=C["fg"]).pack(anchor="w")
+        tk.Label(tf, text="OPEN MEETING COPILOT SETUP", font=BIG, bg=C["bg"], fg=C["fg"]).pack(anchor="w")
         tk.Label(tf, text="Checking your system…", font=MONO8, bg=C["bg"], fg=C["fg2"]).pack(anchor="w")
 
         tk.Frame(self.root, bg=C["border"], height=1).pack(fill="x", padx=24, pady=14)
