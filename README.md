@@ -6,6 +6,7 @@
 ![Python](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Release](https://img.shields.io/github/v/release/Sombra-1/zoom-copilot)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey)
+[![CI](https://github.com/Sombra-1/zoom-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/Sombra-1/zoom-copilot/actions/workflows/ci.yml)
 
 Listens to your meeting audio, transcribes it, and turns the conversation into live context, summaries, decisions, action items, and Markdown notes from a floating overlay.
 
@@ -35,6 +36,30 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 
 ---
 
+## Reliability and Security
+
+The current release includes several safeguards for long-running meetings and
+repeat start/stop cycles:
+
+- Listening and screen-watch sessions use generation IDs, so stopped workers
+  cannot write into a later session.
+- Audio chunks are processed through one ordered queue, preventing slow network
+  requests from rearranging the transcript.
+- Audio startup failures roll back cleanly instead of leaving the interface in
+  a false listening state.
+- Audio callback and processing queues are bounded to prevent unbounded memory
+  growth when a provider is slow.
+- Deprecated Groq Llama selections are migrated automatically to
+  `openai/gpt-oss-20b` or `openai/gpt-oss-120b`.
+- Offline setup warns about unavailable cloud features but still allows local
+  operation when the core audio dependencies are ready.
+- Downloaded Windows installers must have a valid Authenticode signature.
+  Setup elevates only the VB-Cable driver installation.
+- CI tests Python 3.9, 3.11, and 3.13 and runs compile, lint, unit-test, and
+  high-severity security checks.
+
+---
+
 ## Quick Start (Windows)
 
 **Step 1** — Double-click `setup.bat`
@@ -60,7 +85,8 @@ During a meeting:
 python setup.py
 ```
 
-Checks all dependencies, installs missing ones, and launches the app.
+Checks dependencies, installs missing packages when online, and allows local
+operation when cloud connectivity is unavailable.
 
 ---
 
@@ -77,11 +103,14 @@ Checks all dependencies, installs missing ones, and launches the app.
 
 | Backend | Cost | Requires |
 |---------|------|----------|
-| Built-in (Ollama) | Free, local | Auto-installs on first use |
+| Built-in (Ollama) | Free, local | Auto-setup on Windows; install Ollama manually on Linux |
 | Demo | Free | Nothing — fake replies for UI testing |
 | Groq | Free/developer tiers available; limits vary | Groq API key |
 | Claude | Paid | Anthropic API key |
 | Ollama (custom) | Free, local | Ollama installed + model name |
+
+Existing settings that select Groq's retired Llama models are migrated to the
+equivalent GPT-OSS model automatically.
 
 ---
 
@@ -119,7 +148,7 @@ The project is designed to stay auditable and forkable:
 - Meeting exports use plain Markdown instead of a proprietary format.
 - Notes are generated only from captured transcript text; the prompts tell the model not to invent owners, dates, decisions, or tasks.
 - API keys are stored only in the local `.copilot_settings.json`; on non-Windows systems the file is restricted to the current user.
-- Audio-processing workers are capped so slow transcription or AI calls do not spawn unbounded background threads.
+- Audio capture and processing queues are bounded, and transcript work is committed in capture order.
 
 ---
 
