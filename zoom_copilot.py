@@ -49,7 +49,7 @@ except ImportError:
 
 # PIL is needed for screen capture resizing (separate from pystray)
 try:
-    from PIL import Image as _PIL_Image_SC, ImageGrab as _PIL_ImageGrab
+    from PIL import ImageGrab as _PIL_ImageGrab
     _PIL_AVAILABLE = True
 except ImportError:
     _PIL_AVAILABLE = False
@@ -64,12 +64,13 @@ except ImportError:
 SETTINGS_FILE = os.path.join(os.path.dirname(__file__), ".copilot_settings.json")
 
 # ── State ─────────────────────────────────────────────────────────────────────
-audio_queue          = queue.Queue()
+audio_queue          = queue.Queue(maxsize=256)
 conversation_history = []
 _history_lock        = threading.Lock()    # guards conversation_history
 _listen_event        = threading.Event()   # replaces bool flag — thread-safe
 stream               = None
-_audio_workers       = threading.BoundedSemaphore(2)
+_listen_generation   = 0
+_listen_generation_lock = threading.Lock()
 
 # ── Session stats (thread-safe via atomic int ops on GIL + _stats_lock) ──────
 _stats_lock = threading.Lock()
@@ -86,6 +87,52 @@ def _stats_reset():
 # ── Screen watch state ────────────────────────────────────────────────────────
 _screen_watch_event = threading.Event()
 _screen_region      = {"coords": None}  # {"coords": (left,top,right,bottom)} or None
+_screen_generation  = 0
+_screen_generation_lock = threading.Lock()
+
+
+def _begin_listen_session():
+    """Start a new listening generation and invalidate every older worker."""
+    global _listen_generation
+    with _listen_generation_lock:
+        _listen_generation += 1
+        _listen_event.set()
+        return _listen_generation
+
+
+def _end_listen_session():
+    """Stop listening and invalidate every worker from the current generation."""
+    global _listen_generation
+    with _listen_generation_lock:
+        _listen_generation += 1
+        _listen_event.clear()
+
+
+def _listen_session_active(generation):
+    with _listen_generation_lock:
+        return _listen_event.is_set() and generation == _listen_generation
+
+
+def _begin_screen_session():
+    """Start a screen-watch generation and invalidate older watch loops."""
+    global _screen_generation
+    with _screen_generation_lock:
+        _screen_generation += 1
+        _screen_watch_event.set()
+        return _screen_generation
+
+
+def _end_screen_session():
+    """Stop screen watch and invalidate every worker from the current generation."""
+    global _screen_generation
+    with _screen_generation_lock:
+        _screen_generation += 1
+        _screen_watch_event.clear()
+
+
+def _screen_session_active(generation):
+    with _screen_generation_lock:
+        return _screen_watch_event.is_set() and generation == _screen_generation
 
 # ── Colors / Fonts ────────────────────────────────────────────────────────────
 C = {
@@ -126,11 +173,13 @@ WHISPER_MODELS = (
     "distil-whisper-large-v3-en",  # English only, fastest
 )
 GROQ_AI_MODELS = (
-    "llama-3.1-8b-instant",     # fastest — default
-    "llama-3.3-70b-versatile",  # best quality
-    "openai/gpt-oss-20b",       # very fast reasoning-capable model
+    "openai/gpt-oss-20b",       # fast — default
     "openai/gpt-oss-120b",      # larger reasoning-capable model
 )
+GROQ_MODEL_MIGRATIONS = {
+    "llama-3.1-8b-instant": "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile": "openai/gpt-oss-120b",
+}
 LOCAL_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v2")
 
 SYSTEM_PROMPT = (
@@ -341,7 +390,7 @@ def _default_settings():
         "anthropic_key": "",
         "claude_model":  "claude-sonnet-4-20250514",
         "groq_key":      "",
-        "groq_model":    "llama-3.1-8b-instant",
+        "groq_model":    "openai/gpt-oss-20b",
         "whisper_model":       "whisper-large-v3-turbo",
         "transcription":       "groq",   # "groq" or "local"
         "local_whisper_model": "base",   # tiny/base/small/medium/large-v2
@@ -388,6 +437,9 @@ def _coerce_settings(s):
         cleaned["whisper_model"] = defaults["whisper_model"]
     if cleaned.get("local_whisper_model") not in LOCAL_WHISPER_MODELS:
         cleaned["local_whisper_model"] = defaults["local_whisper_model"]
+    cleaned["groq_model"] = GROQ_MODEL_MIGRATIONS.get(
+        cleaned.get("groq_model"), cleaned.get("groq_model")
+    )
     if cleaned.get("groq_model") not in GROQ_AI_MODELS:
         cleaned["groq_model"] = defaults["groq_model"]
     if cleaned.get("claude_model") == "claude-sonnet-4-6":
@@ -475,6 +527,39 @@ def _ollama_exe():
     return "ollama"  # will raise FileNotFoundError with a clear message
 
 
+def _verify_windows_signature(path):
+    """Raise when a downloaded Windows executable lacks a valid signature."""
+    import subprocess
+    escaped_path = str(path).replace("'", "''")
+    powershell_env = os.environ.copy()
+    # Keep Windows PowerShell from accidentally loading incompatible
+    # PowerShell 7 modules when both editions are installed.
+    powershell_env["PSModulePath"] = os.pathsep.join([
+        os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     "WindowsPowerShell", "Modules"),
+        os.path.join(os.environ.get("WINDIR", r"C:\Windows"),
+                     "System32", "WindowsPowerShell", "v1.0", "Modules"),
+    ])
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            f"(Get-AuthenticodeSignature -LiteralPath '{escaped_path}').Status",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=powershell_env,
+    )
+    status = result.stdout.strip()
+    if result.returncode != 0 or status != "Valid":
+        raise RuntimeError(
+            f"Downloaded installer signature is not valid ({status or 'unknown'}). "
+            "Install Ollama manually from https://ollama.com/download."
+        )
+
+
 def ollama_install_and_start(progress_cb):
     """Install Ollama if needed and start the server. progress_cb(msg) for UI updates."""
     import subprocess, urllib.request, tempfile
@@ -487,29 +572,15 @@ def ollama_install_and_start(progress_cb):
             progress_cb("Downloading Ollama installer...")
             urllib.request.urlretrieve(
                 "https://ollama.com/download/OllamaSetup.exe", installer)
+            progress_cb("Verifying installer signature...")
+            _verify_windows_signature(installer)
             progress_cb("Running installer (approve the UAC prompt)...")
             subprocess.run([installer], check=True)
         else:
-            progress_cb("Installing Ollama — enter your password in the terminal...")
-            # Open a new terminal window so the user can type their sudo password
-            term_cmd = None
-            for term in [["gnome-terminal", "--", "bash", "-c"],
-                         ["xterm", "-e", "bash -c"],
-                         ["konsole", "-e", "bash", "-c"],
-                         ["xfce4-terminal", "-e", "bash -c"]]:
-                if subprocess.run(["which", term[0]], capture_output=True).returncode == 0:
-                    term_cmd = term
-                    break
-
-            script = "curl -fsSL https://ollama.com/install.sh | sh; echo; echo 'Press Enter to close...'; read"
-            if term_cmd:
-                proc = subprocess.Popen(term_cmd + [script])
-                proc.wait()
-            else:
-                # Fallback: try with pkexec (graphical sudo)
-                subprocess.run(
-                    ["pkexec", "bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh"],
-                    check=True)
+            raise RuntimeError(
+                "Automatic privileged Ollama installation is disabled on Linux. "
+                "Install it from https://ollama.com/download, then retry."
+            )
 
         # Start the server
         progress_cb("Starting Ollama server...")
@@ -541,8 +612,7 @@ def capture_screen(region=None):
     region: (left, top, right, bottom) in screen pixels, or None for primary monitor.
     Prefers mss (faster, cross-platform); falls back to PIL ImageGrab."""
     if _MSS_AVAILABLE:
-        import mss
-        with mss.mss() as sct:
+        with _mss.mss() as sct:
             if region:
                 left, top, right, bottom = region
                 mon = {"left": left, "top": top, "width": right - left, "height": bottom - top}
@@ -654,19 +724,19 @@ def ask_ai_vision(image_b64, extra_context, s):
     raise RuntimeError(f"Vision not implemented for backend: {backend}")
 
 
-def screen_watch_loop(s, gui):
+def screen_watch_loop(s, gui, generation):
     """Periodically capture the screen and send to vision AI."""
     interval = max(3, int(s.get("screen_interval", 10)))
     _prev_b64 = [None]
 
-    while _screen_watch_event.is_set():
+    while _screen_session_active(generation):
         # Wait the full interval, but check every second so we stop promptly
         for _ in range(interval):
-            if not _screen_watch_event.is_set():
+            if not _screen_session_active(generation):
                 return
             time.sleep(1)
 
-        if not _screen_watch_event.is_set():
+        if not _screen_session_active(generation):
             return
 
         gui.set_status("Watching screen...", "#c084fc")
@@ -693,6 +763,8 @@ def screen_watch_loop(s, gui):
             _stats_inc("ai_calls")
             reply = ask_ai_vision(b64, context, s)
 
+            if not _screen_session_active(generation):
+                return
             with _history_lock:
                 conversation_history.append({
                     "role": "assistant",
@@ -961,7 +1033,20 @@ def find_device(name):
 
 
 def audio_callback(indata, frames, time_info, status):
-    audio_queue.put(indata.copy())
+    chunk = indata.copy()
+    try:
+        audio_queue.put_nowait(chunk)
+    except queue.Full:
+        # Never block PortAudio's callback. Drop the oldest buffered block so
+        # the live transcript catches up instead of growing without bound.
+        try:
+            audio_queue.get_nowait()
+        except queue.Empty:
+            pass
+        try:
+            audio_queue.put_nowait(chunk)
+        except queue.Full:
+            pass
 
 
 def _numpy_to_wav_bytes(audio_np):
@@ -1086,9 +1171,9 @@ def transcribe_local(audio_np, model_name="base", language="en"):
 
 def faster_whisper_installed():
     try:
-        import faster_whisper  # noqa
-        return True
-    except ImportError:
+        import importlib.util
+        return importlib.util.find_spec("faster_whisper") is not None
+    except (ImportError, ValueError):
         return False
 
 
@@ -1097,7 +1182,7 @@ def install_faster_whisper(progress_cb):
     import subprocess
     progress_cb("Installing faster-whisper...")
     result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "faster-whisper", "-q"],
+        [sys.executable, "-m", "pip", "install", "faster-whisper>=1,<2", "-q"],
         capture_output=True, text=True
     )
     if result.returncode != 0:
@@ -1109,36 +1194,42 @@ def _get_transcription_key(s):
     return s.get("groq_key", "").strip()
 
 
-def transcribe_loop(s, gui):
+def transcribe_loop(s, gui, generation, work_queue):
+    """Collect audio into chunks and enqueue them for one ordered processor."""
     import numpy as np
     buffer = []
     chunk_samples = int(16000 * s["chunk_seconds"])
 
-    while _listen_event.is_set():
+    while _listen_session_active(generation):
         try:
             chunk = audio_queue.get(timeout=1)
+            if not _listen_session_active(generation):
+                return
             buffer.append(chunk)
             if sum(len(c) for c in buffer) >= chunk_samples:
                 audio_np = np.concatenate(buffer).flatten().astype(np.float32)
                 buffer = []
-                if not _audio_workers.acquire(blocking=False):
+                try:
+                    work_queue.put_nowait(audio_np)
+                except queue.Full:
                     _stats_inc("errors")
                     gui.after(0, lambda: gui.set_status("Busy - skipping audio chunk", C["warn"]))
-                    continue
-                threading.Thread(
-                    target=_process_audio_worker,
-                    args=(audio_np, s, gui),
-                    daemon=True,
-                ).start()
         except queue.Empty:
             continue
 
 
-def _process_audio_worker(audio_np, s, gui):
-    try:
-        process_audio(audio_np, s, gui)
-    finally:
-        _audio_workers.release()
+def audio_process_loop(s, gui, generation, work_queue):
+    """Process one session's chunks serially so transcript order is preserved."""
+    while _listen_session_active(generation):
+        try:
+            audio_np = work_queue.get(timeout=1)
+        except queue.Empty:
+            continue
+        try:
+            if _listen_session_active(generation):
+                process_audio(audio_np, s, gui, generation)
+        finally:
+            work_queue.task_done()
 
 
 def _should_respond(text, history, custom_keywords="", interview_mode=False):
@@ -1198,8 +1289,9 @@ def _is_silence(audio_np, rms_threshold=0.008, min_duration_ms=200, samplerate=1
     return rms < rms_threshold
 
 
-def process_audio(audio_np, s, gui):
-    import numpy as np
+def process_audio(audio_np, s, gui, generation=None):
+    if generation is not None and not _listen_session_active(generation):
+        return
     if _is_silence(audio_np):
         return
 
@@ -1245,6 +1337,8 @@ def process_audio(audio_np, s, gui):
         gui.set_status("Error", C["error"])
         return
 
+    if generation is not None and not _listen_session_active(generation):
+        return
     if not text or len(text) < 4:
         gui.set_status(*live_status_args())
         return
@@ -1267,6 +1361,8 @@ def process_audio(audio_np, s, gui):
         _stats_inc("ai_calls")
         try:
             reply = ask_ai(history_snapshot, s)
+            if generation is not None and not _listen_session_active(generation):
+                return
             with _history_lock:
                 conversation_history.append({"role": "assistant", "content": reply})
             gui.append_message("🤖  AI", reply, "ai")
@@ -1991,7 +2087,7 @@ class SetupScreen(tk.Frame):
                 self.after(0, lambda: self._bi_btn.config(text="✓ Ready", state="disabled", fg=C["success"]))
             elif ollama_is_running():
                 self.after(0, lambda: self._bi_status.config(
-                    text=f"Ollama running — model not pulled yet", fg=C["warn"]))
+                    text="Ollama running — model not pulled yet", fg=C["warn"]))
             else:
                 self.after(0, lambda: self._bi_status.config(
                     text="Not installed", fg=C["fg2"]))
@@ -2013,8 +2109,9 @@ class SetupScreen(tk.Frame):
                     text="✓ Ready", state="disabled", fg=C["success"]))
                 self.after(0, lambda: self._bi_progress.config(text=""))
             except Exception as e:
+                err = str(e)
                 self.after(0, lambda: self._bi_progress.config(
-                    text=f"✗ {e}", fg=C["error"]))
+                    text=f"✗ {err}", fg=C["error"]))
                 self.after(0, lambda: self._bi_btn.config(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
@@ -2312,7 +2409,8 @@ class SetupScreen(tk.Frame):
                 )
                 self.after(0, self._check_local_whisper_status)
             except Exception as e:
-                self.after(0, lambda: self._fw_status.config(text=f"✗ {e}", fg=C["error"]))
+                err = str(e)
+                self.after(0, lambda: self._fw_status.config(text=f"✗ {err}", fg=C["error"]))
                 self.after(0, lambda: self._fw_btn.config(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
@@ -2333,7 +2431,8 @@ class SetupScreen(tk.Frame):
                 )
                 self.after(0, self._check_local_whisper_status)
             except Exception as e:
-                self.after(0, lambda: lbl.config(text=f"✗ {str(e)[:20]}", fg=C["error"]))
+                err = str(e)[:20]
+                self.after(0, lambda: lbl.config(text=f"✗ {err}", fg=C["error"]))
                 self.after(0, lambda: inst_btn.config(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
@@ -2351,7 +2450,8 @@ class SetupScreen(tk.Frame):
             try:
                 delete_whisper_model(model_name)
             except Exception as e:
-                self.after(0, lambda: messagebox.showerror("Delete failed", str(e)))
+                err = str(e)
+                self.after(0, lambda: messagebox.showerror("Delete failed", err))
             self.after(0, self._check_local_whisper_status)
 
         threading.Thread(target=run, daemon=True).start()
@@ -2427,8 +2527,9 @@ class SetupScreen(tk.Frame):
                             self._vol_canvas.itemconfig(self._vol_bar, fill=c),
                         ))
             except Exception as e:
+                err = str(e)
                 self.after(0, lambda: self._mic_status.config(
-                    text=f"✗ Error: {e}", fg=C["error"]))
+                    text=f"✗ Error: {err}", fg=C["error"]))
                 self.after(0, lambda: self._mic_btn.config(state="normal"))
                 return
 
@@ -2502,8 +2603,9 @@ class SetupScreen(tk.Frame):
                 self.after(0, lambda: self._status.config(
                     text=f"✓ Connected! AI says: '{reply[:40]}'", fg=C["success"]))
             except Exception as e:
+                err = str(e)[:55]
                 self.after(0, lambda: self._status.config(
-                    text=f"✗ {str(e)[:55]}", fg=C["error"]))
+                    text=f"✗ {err}", fg=C["error"]))
             finally:
                 self.after(0, lambda: self._test_btn.config(state="normal"))
 
@@ -3253,8 +3355,12 @@ class OverlayScreen(tk.Frame):
                 "error")
             return
 
-        _screen_watch_event.set()
-        threading.Thread(target=screen_watch_loop, args=(self.s, self), daemon=True).start()
+        generation = _begin_screen_session()
+        threading.Thread(
+            target=screen_watch_loop,
+            args=(self.s, self, generation),
+            daemon=True,
+        ).start()
 
         self._screen_btn.config(
             text="Stop watch",
@@ -3270,7 +3376,7 @@ class OverlayScreen(tk.Frame):
             f"Screen watch started · {region_str} · every {self.s.get('screen_interval',10)}s", "ai")
 
     def _stop_screen_watch(self):
-        _screen_watch_event.clear()
+        _end_screen_session()
         self._screen_btn.config(
             text="Watch",
             bg="#0a001a", fg="#c084fc",
@@ -3316,14 +3422,40 @@ class OverlayScreen(tk.Frame):
                 break
 
         _stats_reset()
-        _listen_event.set()
-        stream = sd.InputStream(samplerate=16000, channels=1,
-                                device=dev_idx, callback=audio_callback)
-        stream.start()
-
-        threading.Thread(target=transcribe_loop,
-                         args=(self.s, self),
-                         daemon=True).start()
+        new_stream = None
+        try:
+            new_stream = sd.InputStream(
+                samplerate=16000,
+                channels=1,
+                device=dev_idx,
+                callback=audio_callback,
+            )
+            new_stream.start()
+            stream = new_stream
+            generation = _begin_listen_session()
+            work_queue = queue.Queue(maxsize=2)
+            threading.Thread(
+                target=transcribe_loop,
+                args=(self.s, self, generation, work_queue),
+                daemon=True,
+            ).start()
+            threading.Thread(
+                target=audio_process_loop,
+                args=(self.s, self, generation, work_queue),
+                daemon=True,
+            ).start()
+        except Exception as e:
+            _end_listen_session()
+            if new_stream is not None:
+                try:
+                    new_stream.stop()
+                    new_stream.close()
+                except Exception:
+                    pass
+            stream = None
+            self.append_message("ERROR", f"Could not start audio capture: {e}", "error")
+            self.set_status("Error", C["error"])
+            return
 
         self.toggle_btn.config(text="■  STOP  (Ctrl+L)", state="normal",
                                bg="#3a1620", fg=C["error"],
@@ -3336,8 +3468,8 @@ class OverlayScreen(tk.Frame):
 
     def _stop(self):
         global stream
-        _listen_event.clear()
-        _screen_watch_event.clear()  # also stop screen watch if running
+        _end_listen_session()
+        _end_screen_session()  # also stop screen watch if running
         if stream:
             try:
                 stream.stop()
@@ -3388,8 +3520,8 @@ class App:
 
     def _show_setup(self):
         # Stop any active audio + screen watch before switching screens
-        _listen_event.clear()
-        _screen_watch_event.clear()
+        _end_listen_session()
+        _end_screen_session()
         global stream
         if stream:
             try:
@@ -3408,7 +3540,7 @@ class App:
         if self.current:
             self.current.destroy()
         # Reset shared state so a re-launch starts clean
-        _listen_event.clear()
+        _end_listen_session()
         with _history_lock:
             conversation_history.clear()
         while True:

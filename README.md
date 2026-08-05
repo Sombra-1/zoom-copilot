@@ -30,6 +30,7 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 - **Manual input** — type questions to the AI mid-call
 - **Timestamps** on every message
 - **Hardened runtime settings** — settings are validated, clamped, and written atomically
+- **Ordered session processing** — audio stays in meeting order and stopped workers cannot leak into a restart
 - **One-click setup** — `setup.bat` or `setup.py` installs everything automatically
 
 ---
@@ -37,7 +38,7 @@ Listens to your meeting audio, transcribes it, and turns the conversation into l
 ## Quick Start (Windows)
 
 **Step 1** — Double-click `setup.bat`
-- Click YES on the admin prompt
+- Setup runs normally; approve the admin prompt only for the verified VB-Cable driver
 - Wait 1-2 minutes (installs Python packages + VB-Cable audio driver)
 
 **Step 2** — Open Zoom (or Teams / Google Meet)
@@ -78,7 +79,7 @@ Checks all dependencies, installs missing ones, and launches the app.
 |---------|------|----------|
 | Built-in (Ollama) | Free, local | Auto-installs on first use |
 | Demo | Free | Nothing — fake replies for UI testing |
-| Groq | Free (14k req/day) | Groq API key |
+| Groq | Free/developer tiers available; limits vary | Groq API key |
 | Claude | Paid | Anthropic API key |
 | Ollama (custom) | Free, local | Ollama installed + model name |
 
@@ -138,6 +139,27 @@ Enable in Settings → toggle **Practice Assist**.
 - Python 3.8+
 - `sounddevice`, `numpy`, `requests` (auto-installed by setup)
 - VB-Cable virtual audio driver (auto-installed by `setup.bat` on Windows)
+
+---
+
+## Development
+
+Dependency ranges are recorded in `requirements.txt`,
+`requirements-optional.txt`, and `requirements-dev.txt`.
+
+Run the local validation suite before opening a pull request:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-dev.txt
+python -m py_compile zoom_copilot.py setup.py
+python -m tabnanny zoom_copilot.py setup.py tests
+python -m pyflakes zoom_copilot.py setup.py tests
+python -m unittest discover -v
+python -m bandit -q -lll -r zoom_copilot.py setup.py
+```
+
+GitHub Actions runs the compile, lint, test, and high-severity security checks
+across supported Python versions.
 
 ---
 
