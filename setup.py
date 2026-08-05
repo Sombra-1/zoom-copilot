@@ -46,9 +46,20 @@ BIG   = ("Consolas", 13, "bold")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+PACKAGE_SPECS = {
+    "sounddevice": "sounddevice>=0.4.6,<1",
+    "numpy": "numpy>=1.24,<3",
+    "requests": "requests>=2.31,<3",
+    "mss": "mss>=9,<11",
+    "PIL": "Pillow>=10,<13",
+    "pystray": "pystray>=0.19,<1",
+}
+
+
 def pip_install(package):
+    package_spec = PACKAGE_SPECS.get(package, package)
     subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", package],
+        [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", package_spec],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -57,8 +68,15 @@ def check_package(name):
     try:
         __import__(name)
         return True
-    except ImportError:
+    except Exception:
         return False
+
+
+def blocking_checks(results):
+    """Return failed checks that prevent even local/offline operation."""
+    optional_keys = {"internet", "requests", "vbcable", "mss", "PIL", "pystray"}
+    return {key: value for key, value in results.items()
+            if key not in optional_keys and not value}
 
 def check_vbcable():
     """Return True if VB-Cable (CABLE Output) is detected as an audio device."""
@@ -268,8 +286,8 @@ class SetupApp:
             self._log("✓ Internet — Groq API reachable")
             results["internet"] = True
         else:
-            self._set_row("internet", "fail", "no connection")
-            self._log("✗ Cannot reach api.groq.com — check your internet connection")
+            self._set_row("internet", "warn", "offline — local modes available")
+            self._log("⚠ Offline — cloud backends and package downloads are unavailable")
             results["internet"] = False
 
         # sounddevice
@@ -325,8 +343,8 @@ class SetupApp:
                 self._log("✓ requests installed")
                 results["requests"] = True
             except Exception as e:
-                self._set_row("requests", "fail", "install failed")
-                self._log(f"✗ requests install failed: {e}")
+                self._set_row("requests", "warn", "cloud backends unavailable")
+                self._log(f"⚠ requests install failed (local modes still work): {e}")
                 results["requests"] = False
 
         # mss (optional — screen watch)
@@ -405,14 +423,15 @@ class SetupApp:
         self._finish(results)
 
     def _finish(self, results):
-        # Optional packages (mss, PIL, pystray) use None to signal "optional miss"
-        # VB-Cable failure is also a warning, not a hard blocker
-        optional_keys = {"vbcable", "mss", "PIL", "pystray"}
-        blockers = {k: v for k, v in results.items() if k not in optional_keys and not v}
+        blockers = blocking_checks(results)
         vbcable_missing = sys.platform == "win32" and not results.get("vbcable", True)
+        offline = not results.get("internet", True)
 
         if not blockers:
-            if vbcable_missing:
+            if offline:
+                msg = "⚠ Ready for local modes — cloud features are offline"
+                col = C["warn"]
+            elif vbcable_missing:
                 msg = "⚠ Almost ready — install VB-Cable to capture Zoom audio"
                 col = C["warn"]
             else:

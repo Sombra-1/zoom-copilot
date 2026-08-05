@@ -3,14 +3,6 @@ setlocal enabledelayedexpansion
 cd /d "%~dp0"
 title Zoom Co-Pilot — Setup
 
-:: ── Self-elevate to admin (VB-Cable driver needs it) ────────────────────────
-net session >nul 2>&1
-if errorlevel 1 (
-    echo Requesting admin rights...
-    powershell -NoProfile -Command "Start-Process cmd.exe -ArgumentList '/c \"\"%~f0\"\"' -Verb RunAs"
-    exit /b
-)
-
 color 0B
 cls
 echo.
@@ -92,7 +84,7 @@ echo.
 :: ── Step 3: Python packages ────────────────────────────────────────────────
 echo  [3/4] Installing Python packages...
 echo        Core: sounddevice, numpy, requests
-"%VENV%\Scripts\pip.exe" install sounddevice numpy requests -q >> "%LOG%" 2>&1
+"%VENV%\Scripts\pip.exe" install -r "%SCRIPT_DIR%requirements.txt" -q >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo.
     echo  [!] Core package install failed. See setup_log.txt
@@ -103,7 +95,7 @@ if errorlevel 1 (
 echo        Core packages done.
 
 echo        Optional: mss, Pillow, pystray  (screen watch + system tray)
-"%VENV%\Scripts\pip.exe" install mss Pillow pystray -q >> "%LOG%" 2>&1
+"%VENV%\Scripts\pip.exe" install -r "%SCRIPT_DIR%requirements-optional.txt" -q >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo        [WARN] Optional packages failed -- screen watch/tray won't work.
     echo               Core app will still work fine.
@@ -128,12 +120,19 @@ if errorlevel 1 (
 ) else (
     if exist "%CABLE_DIR%" rmdir /s /q "%CABLE_DIR%"
     powershell -NoProfile -Command "Expand-Archive -Path '%CABLE_ZIP%' -DestinationPath '%CABLE_DIR%' -Force" >> "%LOG%" 2>&1
-    echo        Running VB-Cable installer -- click Install when prompted...
-    "%CABLE_DIR%\VBCABLE_Setup_x64.exe" /S >> "%LOG%" 2>&1
+    powershell -NoProfile -Command "$env:PSModulePath=$env:ProgramFiles+'\WindowsPowerShell\Modules;'+$env:WINDIR+'\System32\WindowsPowerShell\v1.0\Modules'; $s=Get-AuthenticodeSignature -LiteralPath '%CABLE_DIR%\VBCABLE_Setup_x64.exe'; if($s.Status -ne 'Valid'){ Write-Error ('Invalid installer signature: '+$s.Status); exit 1 }" >> "%LOG%" 2>&1
     if errorlevel 1 (
-        start /wait "" "%CABLE_DIR%\VBCABLE_Setup_x64.exe"
+        echo        [WARN] VB-Cable installer signature is missing or invalid.
+        echo               Install it manually from: vb-audio.com/Cable
+    ) else (
+        echo        Signature verified. Requesting admin rights for the driver only...
+        powershell -NoProfile -Command "$p=Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode" >> "%LOG%" 2>&1
+        if errorlevel 1 (
+            echo        [WARN] Silent driver install failed. Opening the verified installer...
+            powershell -NoProfile -Command "Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -Verb RunAs -Wait" >> "%LOG%" 2>&1
+        )
+        echo        VB-Cable installed.
     )
-    echo        VB-Cable installed.
 )
 echo.
 
