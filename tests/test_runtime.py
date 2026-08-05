@@ -99,11 +99,25 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any("Could not start audio capture" in row[1]
                             for row in overlay.messages))
 
-    @unittest.skipUnless(sys.platform == "win32", "Authenticode is Windows-only")
-    def test_signature_verifier_accepts_signed_windows_binary(self):
-        copilot._verify_windows_signature(
-            r"C:\Windows\System32\notepad.exe"
+    def test_signature_verifier_accepts_valid_powershell_result(self):
+        result = types.SimpleNamespace(
+            returncode=0,
+            stdout="Valid\n",
+            stderr="",
         )
+        with mock.patch("subprocess.run", return_value=result) as run:
+            copilot._verify_windows_signature("OllamaSetup.exe")
+        run.assert_called_once()
+
+    def test_signature_verifier_rejects_invalid_powershell_result(self):
+        result = types.SimpleNamespace(
+            returncode=0,
+            stdout="NotSigned\n",
+            stderr="",
+        )
+        with mock.patch("subprocess.run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "not valid"):
+                copilot._verify_windows_signature("OllamaSetup.exe")
 
 
 if __name__ == "__main__":
