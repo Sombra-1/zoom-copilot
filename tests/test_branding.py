@@ -7,10 +7,22 @@ import unittest
 from unittest import mock
 
 import zoom_copilot as app
-from copilot_core.branding import ASSETS, apply_window_icon
+from copilot_core.branding import ASSETS, apply_window_icon, logo_label
+from copilot_core.ui_theme import destroy_root
 
 
 class BrandingTests(unittest.TestCase):
+    def test_logo_without_pillow_keeps_the_header_within_its_size_budget(self):
+        root = app.ctk.CTk()
+        try:
+            with mock.patch.dict(sys.modules, {"PIL": None, "PIL.Image": None}):
+                label = logo_label(root, size=28)
+            label.pack()
+            root.update()
+            self.assertTrue(label.cget("image"))
+            self.assertLessEqual(label.winfo_height(), round(28 * root._get_window_scaling()) + 2)
+        finally:
+            destroy_root(root)
     def test_windows_icon_contains_small_and_high_dpi_sizes(self):
         data = (ASSETS / "app.ico").read_bytes()
         reserved, kind, count = struct.unpack_from("<HHH", data)

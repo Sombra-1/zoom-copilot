@@ -1,5 +1,6 @@
 """Application identity and icons, resolved relative to the source distribution."""
 import ctypes
+import math
 from pathlib import Path
 import sys
 import tkinter as tk
@@ -45,7 +46,21 @@ def logo_label(parent, size=26):
             background = parent.cget("bg")
         except (ValueError, tk.TclError):
             background = "#101114"
-        return tk.Label(parent, text="◈", font=("Segoe UI", size), bg=background, fg="#9baeff")
+        getter = "_get_window_scaling" if isinstance(parent, (tk.Tk, tk.Toplevel)) else "_get_widget_scaling"
+        scale = getattr(parent, getter, lambda: 1.0)()
+        pixels = max(1, round(size * scale))
+        try:
+            # Tk supports PNG itself. Keep the logo and its pixel budget when
+            # optional Pillow is missing; point-sized fallback text grew at 96 DPI.
+            source = tk.PhotoImage(master=parent, file=str(ASSETS / "logo.png"))
+            picture = source.subsample(max(1, math.ceil(source.width() / pixels)))
+            label = tk.Label(parent, image=picture, bg=background, bd=0, padx=0, pady=0,
+                             width=pixels, height=pixels)
+            label._brand_image = picture
+            return label
+        except (OSError, tk.TclError):
+            return tk.Label(parent, text="◈", font=("Segoe UI", -max(1, round(pixels * .7))),
+                            bg=background, fg="#9baeff", bd=0, padx=0, pady=0)
 
 
 def tray_icon():

@@ -15,4 +15,6 @@
   manual checks, and per-release dismissal.
 - Fixed lifecycle, audio ordering, capture, setup, windowless error handling,
   and shutdown issues; refreshed dependency requirements and Windows CI.
+- Kept the native PNG logo within its size budget when optional Pillow is absent,
+  preserving answer space in small windows at standard display scaling.
 - Published actual app screenshots, a short synthetic-content demo and logo sources.

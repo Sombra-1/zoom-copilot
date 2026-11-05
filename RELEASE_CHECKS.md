@@ -33,7 +33,7 @@ opening a batch file; the desktop shortcut and `.pyw` entry point avoid it.
 
 | Check | Result |
 | --- | --- |
-| Full suite, including opt-in native capture and math integration tests | 128 passed, no skips |
+| Full suite, including opt-in native capture and math integration tests | 129 passed, no skips |
 | Compilation, indentation and Pyflakes | Passed |
 | Bandit high-severity check | Passed |
 | Python dependency audit of the installed snapshot, including packaging tools | 49 packages; zero known advisory entries |
@@ -46,6 +46,7 @@ opening a batch file; the desktop shortcut and `.pyw` entry point avoid it.
 | Local Whisper in the dedicated app environment | Installed and import verified |
 | Support reminder and release notices | Persistence, offline behavior, lifecycle and real UI tests passed |
 | Both notices at minimum workspace size | Answer, composer and listening controls remain accessible |
+| Logo without optional Pillow at standard Windows scaling | Native PNG fallback preserves the header size and answer area |
 | Public screenshots and demo video | Actual app, synthetic Demo-mode content only |
 
 The installed environment was created from the project requirements, with local
