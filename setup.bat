@@ -61,11 +61,23 @@ if errorlevel 1 (
     for /f "tokens=2" %%v in ('python --version 2^>&1') do echo        Found Python %%v
 )
 :python_ok
+python -c "import sys; raise SystemExit(sys.version_info.__lt__((3, 11)))" >nul 2>&1
+if errorlevel 1 (
+    echo  Python 3.11 or newer is required. Install it from python.org and rerun setup.
+    pause
+    exit /b 1
+)
 echo.
 
 :: ── Step 2: Virtual environment ────────────────────────────────────────────
 echo  [2/4] Setting up isolated environment...
 if exist "%VENV%\Scripts\python.exe" (
+    "%VENV%\Scripts\python.exe" -c "import sys; raise SystemExit(sys.version_info.__lt__((3, 11)))" >nul 2>&1
+    if errorlevel 1 (
+        echo  Existing venv uses an older Python. Rename venv and rerun setup with Python 3.11 or newer.
+        pause
+        exit /b 1
+    )
     echo        Already exists -- skipping.
 ) else (
     python -m venv "%VENV%" >> "%LOG%" 2>&1
@@ -83,7 +95,14 @@ echo.
 
 :: ── Step 3: Python packages ────────────────────────────────────────────────
 echo  [3/4] Installing Python packages...
-echo        Core: sounddevice, numpy, requests
+echo        Updating Python packaging tools...
+"%VENV%\Scripts\python.exe" -m pip install --upgrade pip setuptools -q >> "%LOG%" 2>&1
+if errorlevel 1 (
+    echo  [!] Packaging-tool update failed. Check your connection and setup_log.txt.
+    pause
+    exit /b 1
+)
+echo        Core: sounddevice, numpy, requests, customtkinter
 "%VENV%\Scripts\pip.exe" install -r "%SCRIPT_DIR%requirements.txt" -q >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo.
@@ -94,11 +113,11 @@ if errorlevel 1 (
 )
 echo        Core packages done.
 
-echo        Optional: mss, Pillow, pystray  (screen watch + system tray)
+echo        Optional: capture, tray, Playwright math rendering, Pygments code colors
 "%VENV%\Scripts\pip.exe" install -r "%SCRIPT_DIR%requirements-optional.txt" -q >> "%LOG%" 2>&1
 if errorlevel 1 (
     echo        [WARN] Optional packages failed -- screen watch/tray won't work.
-    echo               Core app will still work fine.
+    echo               Core app will still work fine; math preview needs Playwright and Edge.
 ) else (
     echo        Optional packages done.
 )
@@ -138,10 +157,8 @@ echo.
 
 :: ── Create desktop shortcut ────────────────────────────────────────────────
 echo  Creating desktop shortcut...
-set "SHORTCUT=%USERPROFILE%\Desktop\Zoom Co-Pilot.lnk"
 set "TARGET=%VENV%\Scripts\pythonw.exe"
-set "ARGS=%SCRIPT_DIR%zoom_copilot.py"
-powershell -NoProfile -Command "$s=(New-Object -COM WScript.Shell).CreateShortcut('%SHORTCUT%'); $s.TargetPath='%TARGET%'; $s.Arguments='\"%ARGS%\"'; $s.WorkingDirectory='%SCRIPT_DIR%'; $s.Description='Zoom Co-Pilot'; $s.Save()" >> "%LOG%" 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%create-shortcut.ps1" -PythonPath "%TARGET%" >> "%LOG%" 2>&1
 echo        Shortcut created on Desktop.
 echo.
 

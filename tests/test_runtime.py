@@ -44,11 +44,48 @@ class RuntimeTests(unittest.TestCase):
         copilot._end_screen_session()
         copilot.stream = None
 
+    def test_audio_errors_dispatch_stop_and_cannot_stop_a_new_session(self):
+        for mode in ("missing-whisper", "missing-key", "forbidden"):
+            with self.subTest(mode=mode):
+                callbacks = []
+                gui = types.SimpleNamespace(_post=callbacks.append, _stop=mock.Mock(),
+                                            append_message=mock.Mock(), set_status=mock.Mock())
+                settings = {"transcription": "local" if mode == "missing-whisper" else "groq",
+                            "groq_key": "" if mode == "missing-key" else "test-key"}
+                generation = copilot._begin_listen_session()
+                with mock.patch.object(copilot, "faster_whisper_installed", return_value=False), \
+                        mock.patch.object(copilot, "transcribe_groq", side_effect=RuntimeError("403 Forbidden")):
+                    copilot.process_audio(np.ones(4000, dtype=np.float32), settings, gui, generation)
+                self.assertEqual(len(callbacks), 1)
+                gui._stop.assert_not_called()
+                if mode == "missing-whisper":
+                    callbacks[0]()
+                    gui._stop.assert_called_once()
+                    gui._stop.reset_mock()
+                copilot._begin_listen_session()
+                callbacks[0]()
+                gui._stop.assert_not_called()
+
     def test_new_listen_generation_invalidates_previous_workers(self):
         first = copilot._begin_listen_session()
         second = copilot._begin_listen_session()
         self.assertFalse(copilot._listen_session_active(first))
         self.assertTrue(copilot._listen_session_active(second))
+
+    def test_spoken_question_uses_current_screen_when_vision_is_enabled(self):
+        gui = mock.Mock()
+        gui._active_token.return_value = lambda: True
+        generation = copilot._begin_listen_session()
+        settings = dict(copilot._default_settings(), backend="codex", transcription="local",
+                        vision_mode="periodic", vision_target="desktop")
+        with mock.patch.object(copilot, "faster_whisper_installed", return_value=True), \
+                mock.patch.object(copilot, "transcribe_local", return_value="What can you see on screen?"), \
+                mock.patch.object(copilot, "ask_ai") as text:
+            copilot.process_audio(np.ones(4000, dtype=np.float32), settings, gui, generation)
+            gui.analyze_screen.assert_called_once()
+            self.assertEqual(gui.analyze_screen.call_args.kwargs["settings"]["vision_question"],
+                             "What can you see on screen?")
+            text.assert_not_called()
 
     def test_new_screen_generation_invalidates_previous_workers(self):
         first = copilot._begin_screen_session()

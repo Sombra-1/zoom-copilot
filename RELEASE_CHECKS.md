@@ -1,0 +1,72 @@
+# Production validation — v2.0.0 — 2026-11-05
+
+Validated on Windows with Python 3.11.9. The supported baseline is Python 3.11+.
+
+## Launch
+
+Open **Zoom Co-Pilot** from the Desktop, **Zoom Copilot.exe**, or `launch.pyw`.
+The branded launcher starts the project's windowless Python environment.
+The native launch test reported a zero console handle, usable standard streams,
+constructed settings widgets, and a clean process exit.
+
+`run.bat` remains a compatibility launcher. Windows can briefly show CMD when
+opening a batch file; the desktop shortcut and `.pyw` entry point avoid it.
+
+## Corrections completed
+
+- Added windowless startup with project-environment selection and a startup error dialog.
+- Hid background Python, PowerShell, package-install and Ollama console helpers.
+- Added bounded local exception metadata logs, excluding messages, source lines,
+  credentials, images and conversation content.
+- Made shutdown idempotent and ensured audio close is attempted even if stop fails.
+- Restored the window if system-tray startup fails; stopped the tray during shutdown.
+- Routed installer worker updates through the UI dispatcher and ignored late callbacks.
+- Rejected an empty audio-device name instead of matching the first microphone.
+- Reused an existing Ollama installation when its server is stopped.
+- Updated Pillow to 13.x, its supported resize API, installer checks, Python baseline
+  and CI configuration. Pillow 13 includes the security fixes documented in the
+  [official release notes](https://pillow.readthedocs.io/en/stable/releasenotes/13.0.0.html)
+  and requires Python 3.11+ according to its
+  [supported Python versions](https://pillow.readthedocs.io/en/stable/installation/python-support.html).
+
+## Verification
+
+| Check | Result |
+| --- | --- |
+| Full suite, including opt-in native capture and math integration tests | 128 passed, no skips |
+| Compilation, indentation and Pyflakes | Passed |
+| Bandit high-severity check | Passed |
+| Python dependency audit of the installed snapshot, including packaging tools | 49 packages; zero known advisory entries |
+| Installed dependency compatibility (`pip check`) | Passed |
+| Actual windowless bootstrap | No attached console; clean exit |
+| Real Codex vision through a typed screen question under `pythonw.exe` | Read an application-owned synthetic channel name and number |
+| Offline equation rendering under `pythonw.exe` | Passed |
+| Three settings/workspace round trips | Passed; opacity restored and vision starts Off |
+| Windows capture exclusion, fallback hiding and direct window capture | Passed using synthetic windows |
+| Local Whisper in the dedicated app environment | Installed and import verified |
+| Support reminder and release notices | Persistence, offline behavior, lifecycle and real UI tests passed |
+| Both notices at minimum workspace size | Answer, composer and listening controls remain accessible |
+| Public screenshots and demo video | Actual app, synthetic Demo-mode content only |
+
+The installed environment was created from the project requirements, with local
+Whisper and developer-check dependencies included. `requirements-validated.txt`
+records the exact Windows/Python 3.11 package snapshot used for these checks.
+The dependency audit describes known Python-package advisories at validation time.
+
+The live-image test uploaded only pixels from an application-owned demonstration
+window. Full meeting audio with Zoom/Teams and live Groq/Claude/Ollama account
+requests were not exercised; their dispatch, error and session behavior is covered
+by the regression suite. GitHub Actions checks Python 3.11, 3.12 and 3.13, rebuilds
+the native launcher, and runs high-severity Bandit checks. Current CI results are
+visible on the [Actions page](https://github.com/Sombra-1/zoom-copilot/actions/workflows/ci.yml).
+
+The release ZIP contains source and a small Windows launcher, not a bundled
+Python runtime. `setup.bat` refreshes packaging tools and dependencies. Public
+packages exclude settings, credentials, caches, logs, models and environments.
+SHA-256 checksums accompany the downloadable release assets.
+
+Update notices begin with v2.0. Older installations need one manual update to
+gain the checker; future stable GitHub Releases can notify automatically.
+
+Local failure metadata is stored in `%LOCALAPPDATA%\ZoomCopilot\logs\runtime.log`,
+with rotation limited to three files of approximately 64 KiB each.

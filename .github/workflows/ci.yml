@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.9", "3.11", "3.13"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,9 +25,12 @@ jobs:
         run: python -m pip install -r requirements.txt -r requirements-dev.txt
       - name: Compile and lint
         run: |
-          python -m py_compile zoom_copilot.py setup.py
-          python -m tabnanny zoom_copilot.py setup.py tests
-          python -m pyflakes zoom_copilot.py setup.py tests
+          python -m compileall -q zoom_copilot.py setup.py copilot_core tests tools
+          python -m py_compile launch.pyw
+          python -m tabnanny zoom_copilot.py setup.py copilot_core tests tools
+          python -m pyflakes zoom_copilot.py setup.py launch.pyw copilot_core tests tools
+      - name: Build branded Windows launcher
+        run: ./tools/build-launcher.ps1
       - name: Test
         run: python -m unittest discover -v
 
@@ -42,4 +45,4 @@ jobs:
       - name: Install security scanner
         run: python -m pip install -r requirements-dev.txt
       - name: Scan for high-severity findings
-        run: python -m bandit -q -lll -r zoom_copilot.py setup.py
+        run: python -m bandit -q -lll -r zoom_copilot.py setup.py copilot_core

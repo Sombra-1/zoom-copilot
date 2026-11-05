@@ -26,6 +26,10 @@ import subprocess
 import threading
 import tkinter as tk
 from tkinter import scrolledtext
+from copilot_core.launcher import preferred_python
+from copilot_core.processes import quiet_process_options
+from copilot_core.ui_dispatch import UiDispatcher
+from copilot_core.branding import set_process_identity, apply_window_icon, logo_label
 
 # ── Theme (matches main app) ──────────────────────────────────────────────────
 C = {
@@ -47,12 +51,15 @@ BIG   = ("Consolas", 13, "bold")
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 PACKAGE_SPECS = {
+    "customtkinter": "customtkinter>=5.2,<6",
     "sounddevice": "sounddevice>=0.4.6,<1",
     "numpy": "numpy>=1.24,<3",
     "requests": "requests>=2.31,<3",
     "mss": "mss>=9,<11",
-    "PIL": "Pillow>=10,<13",
+    "PIL": "Pillow>=13,<14",
     "pystray": "pystray>=0.19,<1",
+    "playwright": "playwright>=1.49,<2",
+    "pygments": "Pygments>=2.18,<3",
 }
 
 
@@ -62,11 +69,15 @@ def pip_install(package):
         [sys.executable, "-m", "pip", "install", "--quiet", "--upgrade", package_spec],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **quiet_process_options(),
     )
 
 def check_package(name):
     try:
         __import__(name)
+        if name == "PIL":
+            from importlib.metadata import version
+            return int(version("Pillow").split(".")[0]) == 13
         return True
     except Exception:
         return False
@@ -74,7 +85,7 @@ def check_package(name):
 
 def blocking_checks(results):
     """Return failed checks that prevent even local/offline operation."""
-    optional_keys = {"internet", "requests", "vbcable", "mss", "PIL", "pystray"}
+    optional_keys = {"internet", "requests", "vbcable", "mss", "PIL", "pystray", "playwright", "pygments"}
     return {key: value for key, value in results.items()
             if key not in optional_keys and not value}
 
@@ -107,7 +118,7 @@ def check_internet():
     return False
 
 def python_ok():
-    return sys.version_info >= (3, 8)
+    return sys.version_info >= (3, 11)
 
 def find_main_app():
     """Find zoom_copilot.py next to this script."""
@@ -122,7 +133,13 @@ def find_main_app():
 
 class SetupApp:
     def __init__(self):
+        set_process_identity()
         self.root = tk.Tk()
+        apply_window_icon(self.root)
+        self._alive = threading.Event()
+        self._alive.set()
+        self._dispatcher = UiDispatcher(self.root)
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.title("Open Meeting Copilot — Setup")
         self.root.configure(bg=C["bg"])
         self.root.geometry("480x700+120+80")
@@ -131,13 +148,27 @@ class SetupApp:
 
         self._rows = {}   # name → (icon_lbl, status_lbl, fix_btn)
         self._build()
-        self.root.after(300, self._run_checks)
+        self._start_id = self.root.after(300, self._run_checks)
+
+    def _post(self, callback):
+        return self._dispatcher.post(lambda: callback() if self._alive.is_set() else None)
+
+    def _close(self):
+        if not self._alive.is_set():
+            return
+        self._alive.clear()
+        for name in ("_start_id", "_close_id"):
+            timer = getattr(self, name, None)
+            if timer:
+                self.root.after_cancel(timer)
+        self._dispatcher.close()
+        self.root.destroy()
 
     def _build(self):
         # Header
         hdr = tk.Frame(self.root, bg=C["bg"])
         hdr.pack(fill="x", padx=24, pady=(20, 0))
-        tk.Label(hdr, text="◈", font=("Consolas", 28), bg=C["bg"], fg=C["accent"]).pack(side="left")
+        logo_label(hdr, size=38).pack(side="left")
         tf = tk.Frame(hdr, bg=C["bg"])
         tf.pack(side="left", padx=10)
         tk.Label(tf, text="OPEN MEETING COPILOT SETUP", font=BIG, bg=C["bg"], fg=C["fg"]).pack(anchor="w")
@@ -150,14 +181,17 @@ class SetupApp:
         checks_frame.pack(fill="x", padx=24)
 
         checks = [
-            ("python",      "Python 3.8+"),
+            ("python",      "Python 3.11+"),
             ("internet",    "Internet connection"),
             ("sounddevice", "sounddevice  (audio capture)"),
             ("numpy",       "numpy  (audio processing)"),
             ("requests",    "requests  (AI backends)"),
+            ("customtkinter", "CustomTkinter  (desktop interface)"),
             ("mss",         "mss  (screen watch — optional)"),
             ("PIL",         "Pillow  (screen watch + tray — optional)"),
             ("pystray",     "pystray  (system tray — optional)"),
+            ("playwright",  "Playwright  (math preview — optional)"),
+            ("pygments",    "Pygments  (code colors — optional)"),
         ]
         if sys.platform == "win32":
             checks.append(("vbcable", "VB-Cable  (captures Zoom audio)"))
@@ -226,7 +260,7 @@ class SetupApp:
             self.log.insert("end", msg + "\n")
             self.log.config(state="disabled")
             self.log.see("end")
-        self.root.after(0, _w)
+        self._post(_w)
 
     # ── Row updates ───────────────────────────────────────────────────────────
 
@@ -243,7 +277,7 @@ class SetupApp:
                 fix_btn.pack(side="right")
             else:
                 fix_btn.pack_forget()
-        self.root.after(0, _w)
+        self._post(_w)
 
     # ── Checks ────────────────────────────────────────────────────────────────
 
@@ -253,14 +287,14 @@ class SetupApp:
     def _recheck(self):
         for key in self._rows:
             icon_lbl, status_lbl, fix_btn = self._rows[key]
-            self.root.after(0, lambda i=icon_lbl, s=status_lbl, f=fix_btn: (
+            self._post(lambda i=icon_lbl, s=status_lbl, f=fix_btn: (
                 i.config(text="◌", fg=C["fg2"]),
                 s.config(text="checking…", fg=C["fg2"]),
                 f.pack_forget(),
             ))
-        self.root.after(0, lambda: self._retry_btn.config(state="disabled"))
-        self.root.after(0, lambda: self._launch_btn.config(state="disabled"))
-        self.root.after(0, lambda: self._bottom_status.config(text=""))
+        self._post(lambda: self._retry_btn.config(state="disabled"))
+        self._post(lambda: self._launch_btn.config(state="disabled"))
+        self._post(lambda: self._bottom_status.config(text=""))
         threading.Thread(target=self._check_all, daemon=True).start()
 
     def _check_all(self):
@@ -274,9 +308,9 @@ class SetupApp:
             results["python"] = True
         else:
             v = f"{sys.version_info.major}.{sys.version_info.minor}"
-            self._set_row("python", "fail", f"v{v} — need 3.8+", show_fix=True,
+            self._set_row("python", "fail", f"v{v} — need 3.11+", show_fix=True,
                           fix_cmd=lambda: self._open_url("https://www.python.org/downloads/"))
-            self._log(f"✗ Python {v} is too old. Download 3.8+ from python.org")
+            self._log(f"✗ Python {v} is too old. Download 3.11+ from python.org")
             results["python"] = False
 
         # Internet
@@ -347,6 +381,16 @@ class SetupApp:
                 self._log(f"⚠ requests install failed (local modes still work): {e}")
                 results["requests"] = False
 
+        self._set_row("customtkinter", "working", "checking…")
+        try:
+            if not check_package("customtkinter"):
+                pip_install("customtkinter")
+            self._set_row("customtkinter", "ok", "installed")
+            results["customtkinter"] = True
+        except Exception:
+            self._set_row("customtkinter", "fail", "install failed")
+            results["customtkinter"] = False
+
         # mss (optional — screen watch)
         self._set_row("mss", "working", "checking…")
         if check_package("mss"):
@@ -404,6 +448,17 @@ class SetupApp:
                 self._log(f"⚠ pystray not installed (system tray unavailable): {e}")
                 results["pystray"] = None
 
+        for package in ("playwright", "pygments"):
+            self._set_row(package, "working", "checking…")
+            try:
+                if not check_package(package):
+                    pip_install(package)
+                self._set_row(package, "ok", "installed")
+                results[package] = True
+            except Exception:
+                self._set_row(package, "warn", "optional — not installed")
+                results[package] = None
+
         # VB-Cable (Windows only)
         if sys.platform == "win32":
             self._set_row("vbcable", "working", "checking…")
@@ -437,15 +492,15 @@ class SetupApp:
             else:
                 msg = "✓ All checks passed — ready to launch!"
                 col = C["success"]
-            self.root.after(0, lambda: self._bottom_status.config(text=msg, fg=col))
-            self.root.after(0, lambda: self._launch_btn.config(state="normal"))
+            self._post(lambda: self._bottom_status.config(text=msg, fg=col))
+            self._post(lambda: self._launch_btn.config(state="normal"))
             self._log(msg)
         else:
             msg = f"✗ {len(blockers)} issue(s) need fixing before launch"
-            self.root.after(0, lambda: self._bottom_status.config(text=msg, fg=C["error"]))
+            self._post(lambda: self._bottom_status.config(text=msg, fg=C["error"]))
             self._log(msg)
 
-        self.root.after(0, lambda: self._retry_btn.config(state="normal"))
+        self._post(lambda: self._retry_btn.config(state="normal"))
 
     # ── Actions ───────────────────────────────────────────────────────────────
 
@@ -457,12 +512,15 @@ class SetupApp:
         app = find_main_app()
         if not app:
             self._log("✗ Could not find zoom_copilot.py next to this script.")
-            self.root.after(0, lambda: self._bottom_status.config(
+            self._post(lambda: self._bottom_status.config(
                 text="✗ zoom_copilot.py not found", fg=C["error"]))
             return
         self._log(f"→ Launching {os.path.basename(app)}…")
-        subprocess.Popen([sys.executable, app])
-        self.root.after(800, self.root.destroy)
+        folder = os.path.dirname(app)
+        subprocess.Popen([str(preferred_python(folder, sys.executable)), os.path.join(folder, "launch.pyw")],
+                         cwd=folder, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, **quiet_process_options())
+        self._close_id = self.root.after(800, self._close)
 
     def run(self):
         self.root.mainloop()
