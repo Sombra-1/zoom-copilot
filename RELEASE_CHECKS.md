@@ -1,6 +1,6 @@
 # Release validation
 
-## Zoom Copilot 2.0.1 Hotfix (v2.0.3)
+## v2.0.3 Quality Update
 
 Local Windows validation passed 140 tests across the main suite with native
 capture and a separate offline math-rendering run. The audio recovery tests

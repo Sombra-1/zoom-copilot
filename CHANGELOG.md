@@ -1,6 +1,6 @@
 # Changelog
 
-## 2.0.3 — Zoom Copilot 2.0.1 Hotfix — 2026-11-08
+## 2.0.3 — Quality Update — 2026-11-08
 
 - Added **Cancel finishing** and a 60-second inactivity timeout for final audio
   transcription. Both retain decoded speech and record the interruption in order.
