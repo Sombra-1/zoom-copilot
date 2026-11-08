@@ -173,10 +173,11 @@ are refused. General diagnosis can still use the supplied screen/transcript.
 Developer proposals must identify one exact, unique before/after source
 fragment. The app builds a unified diff without changing code. Approve displayed
 diff is an explicit user action. It checks the original SHA-256, validates Python
-syntax, replaces the file atomically, and reruns the full existing unit suite.
-Reject does not write anything. A failing test result stays visible; an approved
-edit is not silently rolled back. Review exported/source changes normally before
-committing. Codex cannot approve its own edit or choose arbitrary commands.
+syntax, and runs the existing unit suite with the proposed edit in a temporary
+copy. The copy excludes local settings and logs. A failed check discards the
+candidate and shows the test result. On success, the app rechecks the original
+hash and replaces the file atomically. Test processes run with your Python
+process's permissions. Review the proposal before approving it.
 Credentials, settings, paths outside the repository and symlink escapes are not
 available to these tools. Closing the panel/app stops owned checks and requests.
 

@@ -111,5 +111,8 @@ class DebugPanel(tk.Toplevel):
             return
         proposal = self.proposal
         self.reject()
-        self._run(lambda: self.agent.approve(proposal, approved=True),
-                  lambda result: self.show(f"Approved edit applied. Test exit: {result[0]}\n{result[1]}"))
+        def finish(result):
+            code, output = result
+            summary = "Tests passed. Approved edit applied." if code == 0 else f"Tests failed (exit {code}). Edit discarded."
+            self.show(f"{summary}\n{output}")
+        self._run(lambda: self.agent.approve(proposal, approved=True), finish)

@@ -4,6 +4,8 @@ import difflib
 import hashlib
 import os
 import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,7 @@ class DebugAgent:
             raise PermissionError("Developer mode is disabled")
         self.root = Path(repository).resolve(strict=True)
         self._lock = threading.Lock()
+        self._edit_lock = threading.Lock()
         self._owners = set()
         self._closed = False
 
@@ -68,6 +71,9 @@ class DebugAgent:
         return redact(self.source_path(relative).read_text(encoding="utf-8"), limit=None)
 
     def check(self, name):
+        return self._check(name, self.root)
+
+    def _check(self, name, directory):
         commands = {
             "tests": [sys.executable, "-m", "unittest", "discover", "-v"],
             "lint": [sys.executable, "-m", "pyflakes", "zoom_copilot.py", "setup.py", "copilot_core", "tests"],
@@ -78,7 +84,7 @@ class DebugAgent:
         with self._lock:
             if self._closed:
                 raise RuntimeError("Developer tools closed")
-            owner = OwnedProcess(commands[name], cwd=str(self.root), stdout=subprocess.PIPE,
+            owner = OwnedProcess(commands[name], cwd=str(directory), stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace")
             self._owners.add(owner)
         try:
@@ -125,17 +131,66 @@ class DebugAgent:
     def approve(self, proposal, approved=False):
         if not approved:
             raise PermissionError("Explicit approval is required to apply a proposed edit")
-        path = self.source_path(proposal.path)
+        with self._edit_lock:
+            path = self.source_path(proposal.path)
+            self._verify_original(path, proposal)
+            ast.parse(proposal.replacement, filename=str(path))
+            with tempfile.TemporaryDirectory(prefix="copilot-check-") as folder:
+                candidate = Path(folder)
+                # Copy project inputs only. User settings, logs and environments
+                # are outside this temporary test workspace.
+                for name in ("zoom_copilot.py", "setup.py", "launch.pyw", "Zoom Copilot.exe",
+                             "support.json", "copilot_core", "tests", "assets"):
+                    source = self.root / name
+                    if not source.exists() or self._is_link(source):
+                        continue
+                    if source.is_dir():
+                        shutil.copytree(source, candidate / name, ignore=self._ignore_snapshot_files)
+                    elif source.is_file():
+                        shutil.copy2(source, candidate / name)
+                (candidate / path.relative_to(self.root)).write_bytes(proposal.replacement.encode("utf-8"))
+                result = self._check("tests", candidate)
+            if result[0] != 0:
+                return result
+            with self._lock:
+                if self._closed:
+                    raise RuntimeError("Developer tools closed before applying the edit")
+                if self.source_path(proposal.path) != path:
+                    raise RuntimeError("File path changed since review")
+                self._verify_original(path, proposal)
+                self._replace_source(path, proposal.replacement)
+            return result
+
+    @staticmethod
+    def _is_link(path):
+        info = path.lstat()
+        return stat.S_ISLNK(info.st_mode) or bool(
+            getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+        )
+
+    @staticmethod
+    def _ignore_snapshot_files(folder, names):
+        ignored = []
+        for name in names:
+            path = Path(folder) / name
+            if (name.startswith(".") or name in ("__pycache__", "venv", "work")
+                    or DebugAgent._is_link(path)):
+                ignored.append(name)
+        return ignored
+
+    @staticmethod
+    def _verify_original(path, proposal):
         if hashlib.sha256(path.read_bytes()).hexdigest() != proposal.original_hash:
             raise RuntimeError("File changed since review. Generate and review a new proposal.")
-        ast.parse(proposal.replacement, filename=str(path))
+
+    @staticmethod
+    def _replace_source(path, replacement):
         descriptor, temporary = tempfile.mkstemp(prefix=".copilot-patch-", dir=str(path.parent))
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
-                stream.write(proposal.replacement)
+                stream.write(replacement)
+            shutil.copymode(path, temporary)
             os.replace(temporary, path)
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-        # Fixed project tests always run after an approved edit.
-        return self.check("tests")

@@ -1,3 +1,4 @@
+import os
 import queue
 import sys
 import threading
@@ -43,6 +44,8 @@ class RuntimeTests(unittest.TestCase):
         copilot._end_listen_session()
         copilot._end_screen_session()
         copilot.stream = None
+        with copilot._history_lock:
+            copilot.conversation_history.clear()
 
     def test_audio_errors_dispatch_stop_and_cannot_stop_a_new_session(self):
         for mode in ("missing-whisper", "missing-key", "forbidden"):
@@ -56,14 +59,14 @@ class RuntimeTests(unittest.TestCase):
                 with mock.patch.object(copilot, "faster_whisper_installed", return_value=False), \
                         mock.patch.object(copilot, "transcribe_groq", side_effect=RuntimeError("403 Forbidden")):
                     copilot.process_audio(np.ones(4000, dtype=np.float32), settings, gui, generation)
-                self.assertEqual(len(callbacks), 1)
                 gui._stop.assert_not_called()
                 if mode == "missing-whisper":
                     callbacks[0]()
                     gui._stop.assert_called_once()
                     gui._stop.reset_mock()
                 copilot._begin_listen_session()
-                callbacks[0]()
+                for callback in callbacks:
+                    callback()
                 gui._stop.assert_not_called()
 
     def test_new_listen_generation_invalidates_previous_workers(self):
@@ -117,6 +120,107 @@ class RuntimeTests(unittest.TestCase):
             worker.join(timeout=1.2)
 
         self.assertEqual(processed, [1, 2])
+
+    def test_transcription_continues_while_spoken_answer_is_blocked(self):
+        generation = copilot._begin_listen_session()
+        settings = dict(copilot._default_settings(), backend="demo", transcription="local")
+        work, answers = queue.Queue(), queue.Queue(maxsize=1)
+        entered, release, heard_third = threading.Event(), threading.Event(), threading.Event()
+        gui = mock.Mock(spec=["append_message", "set_status", "update_stats", "_post"])
+        gui._post.side_effect = lambda callback: callback()
+        gui.append_message.side_effect = lambda label, text, kind: (
+            heard_third.set() if label == "Transcript" and text == "Third question?" else None
+        )
+
+        def slow_answer(*_args, **_kwargs):
+            entered.set()
+            release.wait(5)
+            return "An answer from the stopped session"
+
+        worker = threading.Thread(target=copilot.audio_process_loop,
+                                  args=(settings, gui, generation, work, answers), daemon=True)
+        inference = threading.Thread(target=copilot.audio_answer_loop,
+                                     args=(gui, generation, answers), daemon=True)
+        with mock.patch.object(copilot, "faster_whisper_installed", return_value=True), \
+                mock.patch.object(copilot, "transcribe_local", side_effect=["First question?", "Second question?", "Third question?"]), \
+                mock.patch.object(copilot, "ask_ai", side_effect=slow_answer):
+            worker.start()
+            inference.start()
+            try:
+                work.put(np.ones(4000, dtype=np.float32))
+                self.assertTrue(entered.wait(3))
+                for _ in range(2):
+                    work.put(np.ones(4000, dtype=np.float32))
+                self.assertTrue(heard_third.wait(3))
+                work.join()
+                self.assertEqual(copilot.get_transcript_lines(),
+                                 ["First question?", "Second question?", "Third question?"])
+                self.assertEqual(answers.queue[0][0], "Third question?")
+            finally:
+                copilot._end_listen_session()
+                release.set()
+                worker.join(2)
+                inference.join(2)
+        self.assertFalse(any(call.args[0] == "Copilot" for call in gui.append_message.call_args_list))
+
+    def test_audio_queue_overflow_is_reported_in_transcript(self):
+        generation = copilot._begin_listen_session()
+        capture, work = copilot.AudioInput(), queue.Queue(maxsize=1)
+        gui = mock.Mock()
+        gui._post.side_effect = lambda callback: callback()
+        reported = threading.Event()
+        gui.append_message.side_effect = lambda label, *_args: reported.set() if label == "Audio gap" else None
+        block = np.ones((16000, 1), dtype=np.float32)
+        capture.callback(block, len(block), None, None)
+        capture.callback(block, len(block), None, None)
+        thread = threading.Thread(target=copilot.transcribe_loop,
+                                  args=({"chunk_seconds": 1}, gui, generation, capture, work), daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(reported.wait(3))
+            self.assertIn("backlog dropped a chunk", copilot.get_transcript_lines()[0])
+            self.assertEqual(work.qsize(), 1)
+        finally:
+            copilot._end_listen_session()
+            thread.join(2)
+
+    def test_queued_vision_prompt_is_cancelled_after_scope_change(self):
+        gui = mock.Mock()
+        gui._vision_epoch = 2
+        copilot._answer_spoken_prompt(gui, "What is on screen?", [], {"vision_mode": "manual"}, lambda: True, 1)
+        gui.analyze_screen.assert_not_called()
+
+    def test_groq_timeout_retries_once_and_cancelled_session_does_not_retry(self):
+        audio = np.ones(4000, dtype=np.float32)
+        with mock.patch("urllib.request.urlopen", side_effect=TimeoutError) as request, \
+                mock.patch.object(copilot.time, "sleep"):
+            with self.assertRaises(TimeoutError):
+                copilot.transcribe_groq(audio, "test-key")
+            self.assertEqual(request.call_count, 2)
+            self.assertTrue(all(call.kwargs["timeout"] == 8 for call in request.call_args_list))
+            request.reset_mock()
+            with self.assertRaises(copilot.Cancelled):
+                copilot.transcribe_groq(audio, "test-key", active=mock.Mock(side_effect=[True, False]))
+            self.assertEqual(request.call_count, 1)
+
+    def test_whisper_cache_uses_hub_override_then_hf_home(self):
+        with mock.patch.dict(os.environ, {"HF_HOME": "test-home", "HUGGINGFACE_HUB_CACHE": "legacy",
+                                         "HF_HUB_CACHE": "explicit"}, clear=True):
+            self.assertEqual(copilot._get_whisper_cache_dir(), "explicit")
+            del os.environ["HF_HUB_CACHE"]
+            self.assertEqual(copilot._get_whisper_cache_dir(), "legacy")
+            del os.environ["HUGGINGFACE_HUB_CACHE"]
+            self.assertEqual(copilot._get_whisper_cache_dir(), os.path.join("test-home", "hub"))
+
+    def test_long_meeting_notes_feed_all_transcript_batches(self):
+        lines = [f"SEGMENT-{number:03} " + "Context for this meeting. " * 6 for number in range(180)]
+        with mock.patch.object(copilot, "_call_ai_backend", return_value="## Decisions\n- Earlier decision") as backend:
+            copilot.ask_meeting_notes(lines, {"backend": "demo"})
+        batches = [call.args[0] for call in backend.call_args_list]
+        self.assertGreater(len(batches), 1)
+        self.assertIn("Earlier decision", batches[1][0]["content"])
+        self.assertEqual("".join(batch[-1]["content"].removeprefix("[TRANSCRIPT_LOG]\n") for batch in batches),
+                         "\n".join(f"- {line}" for line in lines))
 
     def test_audio_start_failure_rolls_back_listening_state(self):
         class BrokenSoundDevice(types.ModuleType):

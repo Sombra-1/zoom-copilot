@@ -35,10 +35,42 @@ class DebugAgentTests(unittest.TestCase):
 
     def test_approved_patch_runs_tests(self):
         proposal = self.agent.propose("zoom_copilot.py", "value = 2\n")
-        with mock.patch.object(self.agent, "check", return_value=(0, "Tests OK")) as check:
+        (self.root / ".copilot_settings.json").write_text('{"secret":"token"}')
+        def check_candidate(name, candidate):
+            self.assertEqual(name, "tests")
+            self.assertEqual(self.path.read_bytes(), b"value = 1\n")
+            self.assertEqual((candidate / self.path.name).read_bytes(), b"value = 2\n")
+            self.assertFalse((candidate / ".copilot_settings.json").exists())
+            return 0, "Tests OK"
+        with mock.patch.object(self.agent, "_check", side_effect=check_candidate):
             self.assertEqual(self.agent.approve(proposal, approved=True)[0], 0)
-        check.assert_called_once_with("tests")
         self.assertEqual(self.path.read_text(), "value = 2\n")
+
+    def test_failing_candidate_leaves_original_bytes_on_disk(self):
+        tests = self.root / "tests"
+        tests.mkdir()
+        (tests / "__init__.py").touch()
+        (tests / "test_value.py").write_text(
+            "import unittest\nimport zoom_copilot\n\n"
+            "class ValueTest(unittest.TestCase):\n"
+            "    def test_value(self):\n"
+            "        self.assertEqual(zoom_copilot.value, 1)\n", encoding="utf-8"
+        )
+        proposal = self.agent.propose("zoom_copilot.py", "value = 2\n")
+        code, output = self.agent.approve(proposal, approved=True)
+        self.assertNotEqual(code, 0)
+        self.assertIn("2 != 1", output)
+        self.assertEqual(self.path.read_bytes(), b"value = 1\n")
+
+    def test_concurrent_edit_during_candidate_test_is_preserved(self):
+        proposal = self.agent.propose("zoom_copilot.py", "value = 2\n")
+        def concurrent_edit(_name, _candidate):
+            self.path.write_bytes(b"value = 3\n")
+            return 0, "Tests OK"
+        with mock.patch.object(self.agent, "_check", side_effect=concurrent_edit):
+            with self.assertRaisesRegex(RuntimeError, "changed since review"):
+                self.agent.approve(proposal, approved=True)
+        self.assertEqual(self.path.read_bytes(), b"value = 3\n")
 
     def test_stale_patch_and_invalid_python_are_rejected(self):
         proposal = self.agent.propose("zoom_copilot.py", "value = 2\n")

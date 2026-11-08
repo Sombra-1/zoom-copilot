@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.0.1 — 2026-11-08
+
+- Separated spoken AI replies from transcription. The workspace shows queued
+  audio and marks detected gaps in the transcript and Markdown export.
+- Tested proposed developer edits in a temporary copy before applying them.
+  Failed tests discard the candidate, and a concurrent edit is preserved.
+- Generated meeting notes from the available transcript in batches, carrying
+  forward earlier decisions, action items and open questions.
+- Shortened Groq transcription timeouts and limited transient failures to one
+  retry. Stopped sessions cancel pending retries.
+- Corrected Local Whisper model discovery for custom Hugging Face caches.
+
 ## 2.0.0 — 2026-11-05
 
 - Redesigned the provider setup, meeting workspace, answer panel and compact layout.
