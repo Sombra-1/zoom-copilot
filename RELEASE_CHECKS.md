@@ -1,8 +1,24 @@
-# Production validation — v2.0.0 — 2026-11-05
+# Release validation
+
+## v2.0.2 audio hotfix
+
+The Windows suite passed all 138 tests with native capture and math rendering
+enabled. The listening UI passed 30 synthetic start/stop cycles and finished a
+partial utterance after Stop. An accelerated replay fed 900 eight-second chunks
+to a deliberately stalled decoder. The queue peaked at eight chunks, and the
+transcript placed the recorded loss between the surviving speech and final tail.
+Live meeting validation remains open.
+
+## v2.0.1 reliability release
+
+See the [v2.0.1 validation record](docs/release-checks-v2.0.1.md) for that release's
+local tests, CI and asset verification.
+
+## v2.0.0 baseline — 2026-11-05
 
 Validated on Windows with Python 3.11.9. The supported baseline is Python 3.11+.
 
-## Launch
+### Launch
 
 Open **Zoom Co-Pilot** from the Desktop, **Zoom Copilot.exe**, or `launch.pyw`.
 The branded launcher starts the project's windowless Python environment.
@@ -12,7 +28,7 @@ constructed settings widgets, and a clean process exit.
 `run.bat` remains a compatibility launcher. Windows can briefly show CMD when
 opening a batch file; the desktop shortcut and `.pyw` entry point avoid it.
 
-## Corrections completed
+### Corrections completed
 
 - Added windowless startup with project-environment selection and a startup error dialog.
 - Hid background Python, PowerShell, package-install and Ollama console helpers.
@@ -29,7 +45,7 @@ opening a batch file; the desktop shortcut and `.pyw` entry point avoid it.
   and requires Python 3.11+ according to its
   [supported Python versions](https://pillow.readthedocs.io/en/stable/installation/python-support.html).
 
-## Verification
+### Verification
 
 | Check | Result |
 | --- | --- |

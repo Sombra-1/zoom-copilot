@@ -10,8 +10,8 @@ using Microsoft.Win32;
 [assembly: AssemblyTitle("Zoom Copilot")]
 [assembly: AssemblyDescription("Zoom Copilot desktop launcher")]
 [assembly: AssemblyProduct("Zoom Copilot")]
-[assembly: AssemblyVersion("2.0.1.0")]
-[assembly: AssemblyFileVersion("2.0.1.0")]
+[assembly: AssemblyVersion("2.0.2.0")]
+[assembly: AssemblyFileVersion("2.0.2.0")]
 [assembly: AssemblyCopyright("Copyright (C) 2026 Sombra-1")]
 
 internal static class WindowsLauncher

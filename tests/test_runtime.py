@@ -99,11 +99,11 @@ class RuntimeTests(unittest.TestCase):
     def test_audio_processor_preserves_queue_order(self):
         generation = copilot._begin_listen_session()
         work = queue.Queue()
-        work.put(np.array([1], dtype=np.float32))
-        work.put(np.array([2], dtype=np.float32))
+        work.put(copilot.TranscriptionJob(np.array([1], dtype=np.float32)))
+        work.put(copilot.TranscriptionJob(np.array([2], dtype=np.float32)))
         processed = []
 
-        def record(audio, _settings, _gui, _generation):
+        def record(audio, _settings, _gui, _generation, _answers, _capture):
             processed.append(int(audio[0]))
 
         with mock.patch.object(copilot, "process_audio", side_effect=record):
@@ -147,10 +147,10 @@ class RuntimeTests(unittest.TestCase):
             worker.start()
             inference.start()
             try:
-                work.put(np.ones(4000, dtype=np.float32))
+                work.put(copilot.TranscriptionJob(np.ones(4000, dtype=np.float32)))
                 self.assertTrue(entered.wait(3))
                 for _ in range(2):
-                    work.put(np.ones(4000, dtype=np.float32))
+                    work.put(copilot.TranscriptionJob(np.ones(4000, dtype=np.float32)))
                 self.assertTrue(heard_third.wait(3))
                 work.join()
                 self.assertEqual(copilot.get_transcript_lines(),
@@ -163,26 +163,76 @@ class RuntimeTests(unittest.TestCase):
                 inference.join(2)
         self.assertFalse(any(call.args[0] == "Copilot" for call in gui.append_message.call_args_list))
 
-    def test_audio_queue_overflow_is_reported_in_transcript(self):
+    def test_stop_drains_partial_audio_after_ordered_backlog_gap(self):
         generation = copilot._begin_listen_session()
         capture, work = copilot.AudioInput(), queue.Queue(maxsize=1)
-        gui = mock.Mock()
-        gui._post.side_effect = lambda callback: callback()
-        reported = threading.Event()
-        gui.append_message.side_effect = lambda label, *_args: reported.set() if label == "Audio gap" else None
+        settings = dict(copilot._default_settings(), transcription="local", chunk_seconds=1)
+        gui = mock.Mock(spec=["append_message", "set_status", "update_stats", "_post", "_finish_audio_stop"])
+        backlog_ready, finished = threading.Event(), threading.Event()
+
+        def post(callback):
+            callback()
+            return True
+
+        def stats():
+            if gui.update_stats.call_count == 2:
+                backlog_ready.set()
+
+        def finish(*_args):
+            copilot._end_listen_session()
+            finished.set()
+
+        gui._post.side_effect = post
+        gui.update_stats.side_effect = stats
+        gui._finish_audio_stop.side_effect = finish
         block = np.ones((16000, 1), dtype=np.float32)
         capture.callback(block, len(block), None, None)
         capture.callback(block, len(block), None, None)
-        thread = threading.Thread(target=copilot.transcribe_loop,
-                                  args=({"chunk_seconds": 1}, gui, generation, capture, work), daemon=True)
-        thread.start()
-        try:
-            self.assertTrue(reported.wait(3))
-            self.assertIn("backlog dropped a chunk", copilot.get_transcript_lines()[0])
-            self.assertEqual(work.qsize(), 1)
-        finally:
-            copilot._end_listen_session()
-            thread.join(2)
+        collector = threading.Thread(target=copilot.transcribe_loop,
+                                     args=(settings, gui, generation, capture, work), daemon=True)
+        decoder = threading.Thread(target=copilot.audio_process_loop,
+                                   args=(settings, gui, generation, work, None, capture), daemon=True)
+        with mock.patch.object(copilot, "faster_whisper_installed", return_value=True), \
+                mock.patch.object(copilot, "transcribe_local", side_effect=["Earlier speech", "Yes"]) as transcribe, \
+                mock.patch.object(copilot, "ask_ai") as ask:
+            collector.start()
+            try:
+                self.assertTrue(backlog_ready.wait(3))
+                self.assertEqual(copilot.get_transcript_lines(), [])
+                self.assertEqual(work.qsize(), 1)
+                # Stop with the queue full and a tail shorter than 200 ms.
+                capture.callback(block[:2000], 2000, None, None)
+                capture.closed.set()
+                decoder.start()
+                self.assertTrue(finished.wait(3))
+                self.assertEqual([len(call.args[0]) for call in transcribe.call_args_list], [16000, 2000])
+                self.assertEqual([call.args[0] for call in gui.append_message.call_args_list],
+                                 ["Transcript", "Audio gap", "Transcript"])
+                first, gap, last = copilot.get_transcript_lines()
+                self.assertEqual((first, last), ("Earlier speech", "Yes"))
+                self.assertIn("backlog dropped audio (about 1.0 s)", gap)
+                ask.assert_not_called()
+            finally:
+                copilot._end_listen_session()
+                collector.join(2)
+                if decoder.ident is not None:
+                    decoder.join(2)
+
+    def test_last_dropped_input_block_produces_a_trailing_gap(self):
+        generation = copilot._begin_listen_session()
+        capture, work = copilot.AudioInput(), queue.Queue(maxsize=2)
+        capture.blocks = queue.Queue(maxsize=1)
+        block = np.ones((4000, 1), dtype=np.float32)
+        capture.callback(block, len(block), None, None)
+        capture.callback(block, len(block), None, types.SimpleNamespace(input_overflow=True))
+        capture.closed.set()
+        copilot.transcribe_loop({"chunk_seconds": 1}, mock.Mock(), generation, capture, work)
+        speech, gap = work.get_nowait(), work.get_nowait()
+        self.assertEqual(len(speech.audio), len(block))
+        self.assertFalse(speech.gaps)
+        self.assertIsNone(gap.audio)
+        self.assertEqual(gap.gaps, (("Audio input buffer overflowed", 4000),
+                                    ("The audio device reported an input overflow", 0)))
 
     def test_queued_vision_prompt_is_cancelled_after_scope_change(self):
         gui = mock.Mock()

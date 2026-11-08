@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.2 — 2026-11-08
+
+- Stop listening closes the input stream and finishes queued transcription,
+  including the final partial chunk, before returning to Start listening.
+- Audio gap markers pass through the same ordered worker as speech. A final
+  dropped input block is reported even if no later audio arrives.
+- Added a [separate validation record for v2.0.1](docs/release-checks-v2.0.1.md).
+
 ## 2.0.1 — 2026-11-08
 
 - Separated spoken AI replies from transcription. The workspace shows queued

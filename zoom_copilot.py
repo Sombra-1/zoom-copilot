@@ -35,6 +35,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass
 from copilot_core.backends import Backend, BackendRegistry, backend_is_local
 from copilot_core.codex_backend import SERVICE as CODEX, codex_text, codex_vision
 from copilot_core.codex_client import Cancelled
@@ -1073,10 +1074,14 @@ class AudioInput:
 
     def __init__(self):
         self.blocks = queue.Queue(maxsize=256)
+        self.closed = threading.Event()
+        self.collected = threading.Event()
         self.position = 0
         self.overflow_pending = False
 
     def callback(self, indata, frames, _time_info, status):
+        if self.closed.is_set():
+            return
         position = self.position
         self.position += frames
         self.overflow_pending |= bool(getattr(status, "input_overflow", False))
@@ -1259,75 +1264,128 @@ def _show_audio_backlog(gui, generation, work_queue, seconds):
     gui.update_stats()
 
 
+@dataclass(frozen=True)
+class TranscriptionJob:
+    audio: object = None
+    gaps: tuple = ()
+
+
 def transcribe_loop(s, gui, generation, capture, work_queue):
     """Collect audio into chunks and enqueue them for one ordered processor."""
     import numpy as np
     buffer, buffered_samples = [], 0
+    gaps = {}
     expected_position = 0
     chunk_samples = int(16000 * s["chunk_seconds"])
-
-    def submit():
-        nonlocal buffer, buffered_samples
-        if not buffer:
-            return
-        if buffered_samples >= 3200:
-            audio_np = np.concatenate(buffer).reshape(-1)
-            try:
-                work_queue.put_nowait(audio_np)
-            except queue.Full:
-                _record_audio_gap(gui, active, "Transcription backlog dropped a chunk", buffered_samples)
-        elif buffered_samples:
-            _record_audio_gap(gui, active, "An interrupted audio fragment was too short to transcribe", buffered_samples)
-        buffer, buffered_samples = [], 0
-        _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
 
     def active():
         return _listen_session_active(generation)
 
-    while _listen_session_active(generation):
-        try:
-            position, chunk, overflow = capture.blocks.get(timeout=0.25)
-            if not _listen_session_active(generation):
-                return
+    def add_gap(reason, samples=0):
+        gaps[reason] = gaps.get(reason, 0) + samples
+
+    def submit():
+        nonlocal buffer, buffered_samples
+        if not buffer and not gaps:
+            return
+        audio = None
+        samples = buffered_samples
+        if buffer:
+            if samples >= 3200 or capture.closed.is_set():
+                audio = np.concatenate(buffer).reshape(-1)
+            else:
+                add_gap("An interrupted audio fragment was too short to transcribe", samples)
+        buffer, buffered_samples = [], 0
+        job = TranscriptionJob(audio, tuple(gaps.items()))
+        while active():
+            try:
+                if capture.closed.is_set():
+                    # Capture has ended, so waiting for room cannot block input.
+                    work_queue.put(job, timeout=0.1)
+                else:
+                    work_queue.put_nowait(job)
+            except queue.Full:
+                if capture.closed.is_set():
+                    continue
+                if audio is not None:
+                    add_gap("Transcription backlog dropped audio", samples)
+                break
+            else:
+                gaps.clear()
+                break
+        _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
+
+    try:
+        while active():
+            try:
+                position, chunk, overflow = capture.blocks.get(timeout=0.1)
+            except queue.Empty:
+                if capture.closed.is_set() and capture.blocks.empty():
+                    break
+                continue
+            if not active():
+                break
             lost = position - expected_position
             if lost or overflow:
-                submit()
+                if buffer:
+                    submit()
                 if lost:
-                    _record_audio_gap(gui, active, "Audio input buffer overflowed", lost)
+                    add_gap("Audio input buffer overflowed", lost)
                 if overflow:
-                    _record_audio_gap(gui, active, "The audio device reported an input overflow")
+                    add_gap("The audio device reported an input overflow")
             expected_position = position + len(chunk)
             buffer.append(chunk)
             buffered_samples += len(chunk)
             if buffered_samples >= chunk_samples:
                 submit()
-        except queue.Empty:
-            continue
+        if active() and capture.closed.is_set():
+            submit()
+            # A dropped callback may be the final block, with no later block
+            # to expose the discontinuity in its sample position.
+            if capture.position > expected_position:
+                add_gap("Audio input buffer overflowed", capture.position - expected_position)
+            if capture.overflow_pending:
+                add_gap("The audio device reported an input overflow")
+            submit()
+    finally:
+        capture.collected.set()
 
 
-def audio_process_loop(s, gui, generation, work_queue, answer_queue=None):
+def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, capture=None):
     """Process one session's chunks serially so transcript order is preserved."""
     while _listen_session_active(generation):
         try:
-            audio_np = work_queue.get(timeout=0.25)
+            job = work_queue.get(timeout=0.1)
         except queue.Empty:
+            if capture is not None and capture.collected.is_set() and work_queue.empty():
+                while _listen_session_active(generation):
+                    if gui._post(lambda: gui._finish_audio_stop(generation, capture)):
+                        break
+                    time.sleep(0.05)
+                return
             continue
         try:
-            if _listen_session_active(generation):
-                if answer_queue is None:
-                    process_audio(audio_np, s, gui, generation)
-                else:
-                    _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
-                    process_audio(audio_np, s, gui, generation, answer_queue)
+            if not _listen_session_active(generation):
+                return
+            overlay_active = gui._active_token() if hasattr(gui, "_active_token") else lambda: True
+            def active(token=overlay_active):
+                return token() and _listen_session_active(generation)
+            for reason, samples in job.gaps:
+                _record_audio_gap(gui, active, reason, samples)
+            if capture is not None:
+                _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
+            if job.audio is not None and active():
+                if process_audio(job.audio, s, gui, generation, answer_queue, capture) is False:
+                    return
         finally:
             work_queue.task_done()
 
 
-def audio_answer_loop(gui, generation, answer_queue):
+def audio_answer_loop(gui, generation, answer_queue, capture=None):
     """Keep at most one answer in flight for spoken prompts."""
-    while _listen_session_active(generation):
+    while _listen_session_active(generation) and (capture is None or not capture.closed.is_set()):
         try:
-            request = answer_queue.get(timeout=0.25)
+            request = answer_queue.get(timeout=0.1)
         except queue.Empty:
             continue
         try:
@@ -1393,13 +1451,25 @@ def _is_silence(audio_np, rms_threshold=0.008, min_duration_ms=200, samplerate=1
     return rms < rms_threshold
 
 
-def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
+def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=None):
     overlay_active = gui._active_token() if hasattr(gui, "_active_token") else lambda: True
     active = lambda: overlay_active() and (generation is None or _listen_session_active(generation))
     if not active():
         return
-    if _is_silence(audio_np):
+    finishing = capture is not None and capture.closed.is_set()
+    if _is_silence(audio_np, min_duration_ms=0 if finishing else 200):
         return
+
+    def show_status():
+        if not active():
+            return
+        if capture is not None and capture.closed.is_set():
+            gui.set_status("Finishing audio…", C["warn"])
+        else:
+            gui.set_status(*live_status_args())
+
+    def answers_active():
+        return active() and (capture is None or not capture.closed.is_set())
 
     use_local = s.get("transcription", "groq") == "local"
 
@@ -1408,8 +1478,8 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
             gui.append_message("ERROR",
                 "faster-whisper is not installed.\n"
                 "Go to Settings → Audio & transcript → Install Whisper.", "error")
-            gui._post(lambda: gui._stop() if active() else None)
-            return
+            gui._post(lambda: gui._stop(drain=False) if active() else None)
+            return False
     else:
         key = _get_transcription_key(s)
         if not key:
@@ -1417,8 +1487,8 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
                 "No Groq API key set.\n"
                 "Go to Settings and paste it in the GROQ API KEY box, or switch to Local transcription.",
                 "error")
-            gui._post(lambda: gui._stop() if active() else None)
-            return
+            gui._post(lambda: gui._stop(drain=False) if active() else None)
+            return False
 
     gui.set_status("Transcribing...", C["warn"])
     try:
@@ -1442,7 +1512,8 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
                 "Groq 403 — your region is blocked by Groq.\n"
                 "→ Fix: Settings → Audio & transcript → Local Whisper.\n"
                 "Listening stopped.", "error")
-            gui._post(lambda: gui._stop() if active() else None)
+            gui._post(lambda: gui._stop(drain=False) if active() else None)
+            return False
         else:
             gui.append_message("ERROR", f"Transcription failed: {e}", "error")
         gui.set_status("Error", C["error"])
@@ -1450,8 +1521,8 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
 
     if not active():
         return
-    if not text or len(text) < 4:
-        gui.set_status(*live_status_args())
+    if not text:
+        gui._post(show_status)
         return
 
     # Only call AI when the transcript is worth responding to
@@ -1471,8 +1542,8 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
         if not active():
             return
         gui.append_message("Transcript", text, "them")
-        if should and answer_queue is not None:
-            request = (text, history_snapshot, dict(s), active, getattr(gui, "_vision_epoch", 0))
+        if should and answer_queue is not None and answers_active():
+            request = (text, history_snapshot, dict(s), answers_active, getattr(gui, "_vision_epoch", 0))
             # Replace an obsolete pending answer under load. Transcription and
             # transcript export still keep every successfully decoded chunk.
             try:
@@ -1483,9 +1554,9 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None):
             answer_queue.put_nowait(request)
 
     gui._post(publish_transcript)
-    if should and answer_queue is None:
-        _answer_spoken_prompt(gui, text, history_snapshot, dict(s), active, getattr(gui, "_vision_epoch", 0))
-    gui._post(lambda: gui.set_status(*live_status_args()) if active() else None)
+    if should and answer_queue is None and answers_active():
+        _answer_spoken_prompt(gui, text, history_snapshot, dict(s), answers_active, getattr(gui, "_vision_epoch", 0))
+    gui._post(show_status)
     gui.update_stats()
 
 
@@ -2270,6 +2341,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
         self._alive = threading.Event()
         self._alive.set()
         self._request_epoch = 0
+        self._audio_input = None
         self._selected_window = None
         self._screen_inflight = threading.Lock()
         self.dispatcher = master._dispatcher
@@ -2405,6 +2477,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
 
     def save_transcript(self):
         """#1 Export chat contents to a timestamped .txt file."""
+        if self._audio_is_finishing():
+            self.set_status("Wait for audio to finish before exporting", C["warn"])
+            return
         content = self._format_chat_log()
         if not content:
             messagebox.showinfo("Nothing to save", "The transcript is empty.")
@@ -2422,6 +2497,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
 
     def export_meeting_markdown(self):
         """Export structured notes plus raw transcript as Markdown."""
+        if self._audio_is_finishing():
+            self.set_status("Wait for audio to finish before exporting", C["warn"])
+            return
         transcript_lines = get_transcript_lines()
         chat_content = self._format_chat_log()
         if not transcript_lines and not chat_content:
@@ -2465,6 +2543,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
 
     def _generate_meeting_notes(self):
         """Generate AI summary, decisions, action items, and open questions."""
+        if self._audio_is_finishing():
+            self.set_status("Wait for audio to finish before making notes", C["warn"])
+            return
         transcript_lines = get_transcript_lines()
         if not transcript_lines:
             self.append_message("SYSTEM", "No transcript captured yet. Start listening first.", "ai")
@@ -2539,6 +2620,8 @@ class OverlayScreen(OverlayServices, tk.Frame):
         self._post(_apply)
 
     def clear(self):
+        if self._audio_is_finishing():
+            self._stop(drain=False)
         _end_screen_session()
         self._close_region_selector()
         self._error_btn.pack_forget()
@@ -2755,6 +2838,8 @@ class OverlayScreen(OverlayServices, tk.Frame):
 
     def _go_live(self):
         global stream
+        if _listen_event.is_set():
+            return
         try:
             import sounddevice as sd
         except ImportError:
@@ -2796,6 +2881,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
             )
             new_stream.start()
             stream = new_stream
+            self._audio_input = capture
             generation = _begin_listen_session()
             work_queue = queue.Queue(maxsize=8)
             answer_queue = queue.Queue(maxsize=1)
@@ -2807,13 +2893,13 @@ class OverlayScreen(OverlayServices, tk.Frame):
             ).start()
             threading.Thread(
                 target=audio_process_loop,
-                args=(self.s, self, generation, work_queue, answer_queue),
+                args=(self.s, self, generation, work_queue, answer_queue, capture),
                 name=f"copilot-audio-transcript-{generation}",
                 daemon=True,
             ).start()
             threading.Thread(
                 target=audio_answer_loop,
-                args=(self, generation, answer_queue),
+                args=(self, generation, answer_queue, capture),
                 name=f"copilot-audio-answer-{generation}",
                 daemon=True,
             ).start()
@@ -2822,6 +2908,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
             if new_stream is not None:
                 _close_audio_stream(new_stream)
             stream = None
+            self._audio_input = None
             self.append_message("ERROR", f"Could not start audio capture: {e}", "error")
             self.set_status("Error", C["error"])
             return
@@ -2835,23 +2922,46 @@ class OverlayScreen(OverlayServices, tk.Frame):
             f"Live · {self.s['backend'].upper()} · transcription: {tr_type} · Ctrl+L to stop", "ai")
         self.update_stats()
 
-    def _stop(self):
-        self._invalidate_requests()
+    def _audio_is_finishing(self):
+        return self._audio_input is not None and self._audio_input.closed.is_set()
+
+    def _close_listening_stream(self):
         global stream
-        _end_listen_session()
-        with _stats_lock:
-            session_stats["queued_audio"] = 0
-        _end_screen_session()  # also stop screen watch if running
         if stream:
             for operation in _close_audio_stream(stream):
                 self.append_message("ERROR", f"Audio stream {operation} failed. Local diagnostics recorded the failure.", "error")
             stream = None
-        self.toggle_btn.config(text="Start listening",
-                               bg=C["accent2"], fg="#ffffff",
-                               activebackground="#7b8ff0", activeforeground="#ffffff")
+
+    def _stop(self, *, drain=True):
+        if drain and self._audio_is_finishing():
+            return
+        _end_screen_session()
         self._screen_btn.config(text="Watch", bg="transparent", fg=C["fg2"])
         self._refresh_vision_label()
         overlay_view.refresh_vision_controls(self)
+        capture = self._audio_input
+        if drain and capture is not None:
+            self._close_listening_stream()
+            capture.closed.set()
+            self.toggle_btn.config(text="Finishing audio…", state="disabled")
+            self.set_status("Finishing audio…", C["warn"])
+        else:
+            self._finish_audio_stop()
+
+    def _finish_audio_stop(self, generation=None, capture=None):
+        if generation is not None and (not _listen_session_active(generation) or
+                                       self._audio_input is not capture or not capture.closed.is_set()):
+            return
+        _end_listen_session()
+        self._close_listening_stream()
+        if self._audio_input is not None:
+            self._audio_input.closed.set()
+            self._audio_input = None
+        self._invalidate_requests()
+        with _stats_lock:
+            session_stats["queued_audio"] = 0
+        self.toggle_btn.config(text="Start listening", state="normal", bg=C["accent2"], fg="#ffffff",
+                               activebackground="#7b8ff0", activeforeground="#ffffff")
         self.set_status("Stopped", C["fg2"])
         self.append_message("SYSTEM", "Stopped.", "ai")
         self.update_stats()
