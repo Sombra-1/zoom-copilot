@@ -84,6 +84,7 @@ _listen_event        = threading.Event()   # replaces bool flag — thread-safe
 stream               = None
 _listen_generation   = 0
 _listen_generation_lock = threading.Lock()
+AUDIO_DRAIN_TIMEOUT_MS = 60_000
 
 # ── Session stats (thread-safe via atomic int ops on GIL + _stats_lock) ──────
 _stats_lock = threading.Lock()
@@ -1076,6 +1077,9 @@ class AudioInput:
         self.blocks = queue.Queue(maxsize=256)
         self.closed = threading.Event()
         self.collected = threading.Event()
+        self.finished = threading.Event()
+        self.last_progress = time.monotonic()
+        self.pending_rows = []  # decoded text awaiting presentation, guarded by _history_lock
         self.position = 0
         self.overflow_pending = False
 
@@ -1154,6 +1158,11 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
 # Size guide: tiny=~40MB, base=~150MB, small=~500MB, medium=~1.5GB, large-v2=~3GB
 
 _local_whisper_model_cache = {}   # model_name → loaded model instance
+_local_whisper_inference = threading.Lock()
+_LOCAL_WHISPER_BUSY = (
+    "Local Whisper is still working on an earlier session. "
+    "Wait for it to finish, restart Zoom Copilot, or select Groq transcription."
+)
 
 
 # ── Whisper model cache management ───────────────────────────────────────────
@@ -1240,17 +1249,29 @@ def _get_transcription_key(s):
     return s.get("groq_key", "").strip()
 
 
-def _record_audio_gap(gui, active, reason, samples=0):
+def _flush_audio_rows(gui, capture):
+    with _history_lock:
+        rows, capture.pending_rows = capture.pending_rows, []
+    for label, text in rows:
+        gui.append_message(label, text, "them")
+
+
+def _record_audio_gap(gui, active, reason, samples=0, capture=None):
     duration = f" (about {samples / 16000:.1f} s)" if samples else ""
     message = f"{reason}{duration}. Some speech may be missing."
     with _history_lock:
         if not active():
             return
         conversation_history.append({"role": "user", "content": f"[AUDIO GAP] {message}"})
+        if capture is not None:
+            capture.pending_rows.append(("Audio gap", message))
         _stats_inc("audio_gaps")
     def show_gap():
         if active():
-            gui.append_message("Audio gap", message, "them")
+            if capture is None:
+                gui.append_message("Audio gap", message, "them")
+            else:
+                _flush_audio_rows(gui, capture)
             gui.update_stats()
     gui._post(show_gap)
 
@@ -1357,7 +1378,9 @@ def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, captur
         try:
             job = work_queue.get(timeout=0.1)
         except queue.Empty:
-            if capture is not None and capture.collected.is_set() and work_queue.empty():
+            if (capture is not None and capture.closed.is_set() and capture.collected.is_set()
+                    and work_queue.empty()):
+                capture.finished.set()
                 while _listen_session_active(generation):
                     if gui._post(lambda: gui._finish_audio_stop(generation, capture)):
                         break
@@ -1371,7 +1394,7 @@ def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, captur
             def active(token=overlay_active):
                 return token() and _listen_session_active(generation)
             for reason, samples in job.gaps:
-                _record_audio_gap(gui, active, reason, samples)
+                _record_audio_gap(gui, active, reason, samples, capture)
             if capture is not None:
                 _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
             if job.audio is not None and active():
@@ -1379,6 +1402,8 @@ def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, captur
                     return
         finally:
             work_queue.task_done()
+            if capture is not None:
+                capture.last_progress = time.monotonic()
 
 
 def audio_answer_loop(gui, generation, answer_queue, capture=None):
@@ -1493,9 +1518,19 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
     gui.set_status("Transcribing...", C["warn"])
     try:
         if use_local:
-            text = transcribe_local(audio_np,
-                                    s.get("local_whisper_model", "base"),
-                                    s.get("language", "en"))
+            if not _local_whisper_inference.acquire(blocking=False):
+                def busy():
+                    if active():
+                        gui.append_message("ERROR", _LOCAL_WHISPER_BUSY, "error")
+                        gui._stop(drain=False)
+                gui._post(busy)
+                return False
+            try:
+                if not active():
+                    return
+                text = transcribe_local(audio_np, s.get("local_whisper_model", "base"), s.get("language", "en"))
+            finally:
+                _local_whisper_inference.release()
         else:
             text = transcribe_groq(audio_np, key,
                                    s.get("language", "en"),
@@ -1506,7 +1541,7 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
         if not active():
             return
         err_str = str(e)
-        _record_audio_gap(gui, active, "Transcription failed for a chunk", len(audio_np))
+        _record_audio_gap(gui, active, "Transcription failed for a chunk", len(audio_np), capture)
         if "403" in err_str or "Forbidden" in err_str:
             gui.append_message("ERROR",
                 "Groq 403 — your region is blocked by Groq.\n"
@@ -1535,13 +1570,18 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
             interview_mode=bool(s.get("interview_mode")),
         )
         conversation_history.append({"role": "user", "content": f"[TRANSCRIPT] {text}"})
+        if capture is not None:
+            capture.pending_rows.append(("Transcript", text))
         history_snapshot = list(conversation_history[-20:])
         _stats_inc("transcriptions")
 
     def publish_transcript():
         if not active():
             return
-        gui.append_message("Transcript", text, "them")
+        if capture is None:
+            gui.append_message("Transcript", text, "them")
+        else:
+            _flush_audio_rows(gui, capture)
         if should and answer_queue is not None and answers_active():
             request = (text, history_snapshot, dict(s), answers_active, getattr(gui, "_vision_epoch", 0))
             # Replace an obsolete pending answer under load. Transcription and
@@ -2342,6 +2382,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
         self._alive.set()
         self._request_epoch = 0
         self._audio_input = None
+        self._audio_drain_timer = None
         self._selected_window = None
         self._screen_inflight = threading.Lock()
         self.dispatcher = master._dispatcher
@@ -2637,6 +2678,8 @@ class OverlayScreen(OverlayServices, tk.Frame):
         self._render_chat_log()
         with _history_lock:
             conversation_history.clear()
+            if self._audio_input is not None:
+                self._audio_input.pending_rows.clear()
         _stats_reset()
         self.update_stats()
         self.set_status(*live_status_args())
@@ -2855,6 +2898,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
         if self.s.get("transcription") == "local" and self.s.get("backend") != "demo" and not faster_whisper_installed():
             self.append_message("ERROR", "Install Local Whisper in Settings → Audio & transcript before starting audio.", "error")
             return
+        if self.s.get("transcription") == "local" and _local_whisper_inference.locked():
+            self.append_message("ERROR", _LOCAL_WHISPER_BUSY, "error")
+            return
 
         dev_idx = find_device(self.s["device_name"])
         if dev_idx is None:
@@ -2942,27 +2988,61 @@ class OverlayScreen(OverlayServices, tk.Frame):
         capture = self._audio_input
         if drain and capture is not None:
             self._close_listening_stream()
+            capture.last_progress = time.monotonic()
             capture.closed.set()
-            self.toggle_btn.config(text="Finishing audio…", state="disabled")
+            self.toggle_btn.config(text="Cancel finishing", state="normal", command=self._cancel_audio_drain)
             self.set_status("Finishing audio…", C["warn"])
+            generation = _listen_generation
+            self._audio_drain_timer = self._later(AUDIO_DRAIN_TIMEOUT_MS,
+                                                  lambda: self._check_audio_drain(generation, capture))
         else:
             self._finish_audio_stop()
 
-    def _finish_audio_stop(self, generation=None, capture=None):
+    def _check_audio_drain(self, generation, capture):
+        self._audio_drain_timer = None
+        if not _listen_session_active(generation) or self._audio_input is not capture or capture.finished.is_set():
+            return
+        elapsed = (time.monotonic() - capture.last_progress) * 1000
+        if elapsed >= AUDIO_DRAIN_TIMEOUT_MS:
+            self._cancel_audio_drain(timed_out=True)
+        else:
+            remaining = max(1, int(AUDIO_DRAIN_TIMEOUT_MS - elapsed))
+            self._audio_drain_timer = self._later(remaining, lambda: self._check_audio_drain(generation, capture))
+
+    def _cancel_audio_drain(self, *, timed_out=False):
+        if not self._audio_is_finishing():
+            return
+        capture = self._audio_input
+        reason = None
+        if not capture.finished.is_set():
+            reason = "Finishing audio timed out" if timed_out else "Finishing audio was canceled"
+        self._finish_audio_stop(_listen_generation, capture, gap_reason=reason)
+
+    def _finish_audio_stop(self, generation=None, capture=None, *, gap_reason=None):
         if generation is not None and (not _listen_session_active(generation) or
                                        self._audio_input is not capture or not capture.closed.is_set()):
             return
-        _end_listen_session()
+        # Seal committed history before recording a final interruption marker.
+        with _history_lock:
+            _end_listen_session()
+        timer, self._audio_drain_timer = self._audio_drain_timer, None
+        if timer is not None:
+            self.after_cancel(timer)
+            self._ui_timers.discard(timer)
         self._close_listening_stream()
         if self._audio_input is not None:
-            self._audio_input.closed.set()
-            self._audio_input = None
+            current, self._audio_input = self._audio_input, None
+            current.closed.set()
+            if gap_reason:
+                _record_audio_gap(self, lambda: True, gap_reason, capture=current)
+            _flush_audio_rows(self, current)
         self._invalidate_requests()
         with _stats_lock:
             session_stats["queued_audio"] = 0
         self.toggle_btn.config(text="Start listening", state="normal", bg=C["accent2"], fg="#ffffff",
-                               activebackground="#7b8ff0", activeforeground="#ffffff")
-        self.set_status("Stopped", C["fg2"])
+                               activebackground="#7b8ff0", activeforeground="#ffffff", command=self.toggle_listening)
+        self.set_status("Stopped · partial transcript available" if gap_reason else "Stopped",
+                        C["warn"] if gap_reason else C["fg2"])
         self.append_message("SYSTEM", "Stopped.", "ai")
         self.update_stats()
 

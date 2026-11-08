@@ -1,5 +1,16 @@
 # Release validation
 
+## Zoom Copilot 2.0.1 Hotfix (v2.0.3)
+
+Local Windows validation passed 140 tests across the main suite with native
+capture and a separate offline math-rendering run. The audio recovery tests
+held the final partial chunk's decoder open while exercising manual cancellation
+and the inactivity timeout. Both paths restored export, retained decoded speech
+and recorded the gap. A later session rejected the abandoned decoder's result.
+
+The tests used synthetic audio. An abandoned native Local Whisper call may stay
+busy until it returns or the app restarts. Live meeting validation remains open.
+
 ## v2.0.2 audio hotfix
 
 The Windows suite passed all 138 tests with native capture and math rendering

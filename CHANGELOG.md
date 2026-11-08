@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.3 — Zoom Copilot 2.0.1 Hotfix — 2026-11-08
+
+- Added **Cancel finishing** and a 60-second inactivity timeout for final audio
+  transcription. Both retain decoded speech and record the interruption in order.
+- Fenced abandoned transcription results and protected the Local Whisper model
+  from concurrent inference after a stalled native call.
+
 ## 2.0.2 — 2026-11-08
 
 - Stop listening closes the input stream and finishes queued transcription,

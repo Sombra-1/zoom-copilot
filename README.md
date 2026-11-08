@@ -41,7 +41,7 @@ All screenshots and demo footage use synthetic content in Demo mode. No meeting 
 
 ## Start on Windows
 
-1. Download **Zoom-Copilot-v2.0.2.zip** from the [latest release](https://github.com/Sombra-1/zoom-copilot/releases/latest) and extract the entire folder.
+1. Download **Zoom-Copilot-v2.0.3.zip** from the [latest release](https://github.com/Sombra-1/zoom-copilot/releases/latest) and extract the entire folder.
 2. Run **setup.bat**. It checks Python 3.11+, creates a virtual environment, installs dependencies, and creates your desktop shortcut. Driver installation may request administrator access.
 3. Open **Zoom Co-Pilot** from your Desktop, or **Zoom Copilot.exe** in the extracted folder.
 4. Choose an AI provider. **Demo** lets you explore the interface immediately without an account. Configure audio when you want transcription, then select **Open workspace**.
@@ -86,7 +86,7 @@ Transcription is separate: choose **Groq Whisper** with your own Groq key, or in
 - Codex uses its own managed sign-in. Copilot does not read or copy Codex credential files, and meeting requests do not receive shell, filesystem, or desktop tools.
 - Keys and app configuration stay in your local `.copilot_settings.json`. Treat that file as a secret.
 - Transcription uses its own ordered queue, so a slow spoken answer does not stall it. The footer shows queued audio and gap counts. Detected losses appear between the surrounding speech in the transcript and Markdown export.
-- **Stop listening** closes the input stream and finishes captured audio, including the last partial chunk, through the selected transcription provider. Wait for **Finishing audio…** to clear before generating notes or exporting.
+- **Stop listening** closes the input stream and finishes captured audio, including the last partial chunk, through the selected transcription provider. **Cancel finishing** restores notes and export using the speech already decoded. The app also recovers after 60 seconds without progress.
 - The spoken answer worker keeps the newest pending prompt when it falls behind. The transcript keeps decoded chunks from the active session. Generation guards prevent stopped workers from writing into a later session.
 - **Make notes** processes the available transcript in batches and carries earlier notes forward. Long meetings may take several requests to your selected provider.
 - Notes are prompted to use captured context and acknowledge missing information. Review AI-generated notes before relying on them.
