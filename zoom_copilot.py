@@ -418,6 +418,8 @@ def _default_settings():
         "language":            "en",
         "device_name":         "CABLE Output" if sys.platform == "win32" else "zoom_capture.monitor",
         "chunk_seconds":       8,
+        "silero_vad":          False,
+        "vad_sensitivity":     0.5,
         "opacity":             0.94,
         "custom_keywords":       "",     # comma-separated user-defined trigger words
         "screen_interval":       10,    # seconds between screen captures when watching
@@ -467,10 +469,11 @@ def _coerce_settings(s):
         cleaned["claude_model"] = defaults["claude_model"]
 
     cleaned["chunk_seconds"] = _clamp_int(cleaned.get("chunk_seconds"), defaults["chunk_seconds"], 2, 30)
+    cleaned["vad_sensitivity"] = _clamp_float(cleaned.get("vad_sensitivity"), 0.5, 0.1, 0.9)
     cleaned["screen_interval"] = _clamp_int(cleaned.get("screen_interval"), defaults["screen_interval"], 3, 300)
     cleaned["opacity"] = _clamp_float(cleaned.get("opacity"), defaults["opacity"], 0.3, 1.0)
     cleaned["interview_mode"] = bool(cleaned.get("interview_mode"))
-    for key in ("presentation_mode", "developer_mode"):
+    for key in ("presentation_mode", "developer_mode", "silero_vad"):
         cleaned[key] = cleaned.get(key) is True
     for key, choices in (("vision_mode", ("off", "manual", "periodic")),
                          ("vision_target", ("region", "window", "screen", "desktop")),
@@ -1156,11 +1159,15 @@ def _numpy_to_wav_bytes(audio_np):
     return buf.getvalue()
 
 
-def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo", active=None):
+def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo", active=None, overlap_samples=0):
     """Send a chunk to Groq and retry a transient failure once."""
     import urllib.request, urllib.error, json as _json
     wav = _numpy_to_wav_bytes(audio_np)
     boundary = "GCPBoundary7MA4YWxkTrZu0gW"
+    timing = ""
+    if overlap_samples:
+        timing = (f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nverbose_json"
+                  f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"timestamp_granularities[]\"\r\n\r\nword")
     body = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
@@ -1169,8 +1176,8 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
         f"\r\n--{boundary}\r\n"
         f'Content-Disposition: form-data; name="model"\r\n\r\n{model}\r\n'
         f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\n{language}\r\n'
-        f"--{boundary}--\r\n"
+        f'Content-Disposition: form-data; name="language"\r\n\r\n{language}'
+        f"{timing}\r\n--{boundary}--\r\n"
     ).encode()
 
     last_err = None
@@ -1188,7 +1195,14 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=8) as resp:
-                return _json.loads(resp.read())["text"].strip()
+                result = _json.loads(resp.read())
+                words = result.get("words")
+                if overlap_samples and isinstance(words, list) and words and all(
+                    isinstance(word, dict) and isinstance(word.get("word"), str)
+                    and isinstance(word.get("end"), (int, float)) for word in words
+                ):
+                    return " ".join(word["word"].strip() for word in words if word["end"] * 16000 > overlap_samples)
+                return result["text"].strip()
         except urllib.error.HTTPError as e:
             # 4xx = client errors (bad key, quota) — don't retry
             if 400 <= e.code < 500:
@@ -1207,16 +1221,16 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
 
 def is_whisper_model_downloaded(model_name):
     """Return True if the faster-whisper model files are cached locally."""
-    folder = os.path.join(_get_whisper_cache_dir(),
-                          f"models--Systran--faster-whisper-{model_name}", "snapshots")
-    if not os.path.isdir(folder):
-        return False
     try:
+        folder = os.path.join(_get_whisper_cache_dir(),
+                              f"models--Systran--faster-whisper-{model_name}", "snapshots")
+        if not os.path.isdir(folder):
+            return False
         for snap in os.listdir(folder):
             snap_path = os.path.join(folder, snap)
             if os.path.isdir(snap_path) and os.listdir(snap_path):
                 return True
-    except OSError:
+    except (OSError, RuntimeError):
         pass
     return False
 
@@ -1239,11 +1253,11 @@ def download_whisper_model(model_name, progress_cb):
         WhisperModel(model_name, device="cpu", compute_type="int8", download_root=_get_whisper_cache_dir())
 
 
-def transcribe_local(audio_np, model_name="base", language="en", session=None):
+def transcribe_local(audio_np, model_name="base", language="en", session=None, overlap_samples=0):
     """Transcribe locally and retain the model for the current listening run."""
     worker = session if session is not None else WhisperSession()
     try:
-        return worker.transcribe(audio_np, model_name, language)
+        return worker.transcribe(audio_np, model_name, language, overlap_samples)
     finally:
         if session is None:
             worker.close()
@@ -1316,6 +1330,8 @@ def _show_audio_backlog(gui, generation, work_queue):
 class TranscriptionJob:
     audio: object = None
     gaps: tuple = ()
+    speech_detected: bool = False
+    overlap_samples: int = 0
 
 
 def transcribe_loop(s, gui, generation, capture, work_queue):
@@ -1328,6 +1344,9 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
     chunk_samples = int(16000 * s["chunk_seconds"])
     min_pause_chunk = 2 * 16000
     pause_samples = int(0.4 * 16000)
+    overlap_samples = int(0.32 * 16000)
+    overlap = None
+    detector = None
 
     def active():
         return _listen_session_active(generation)
@@ -1335,20 +1354,47 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
     def add_gap(reason, samples=0):
         gaps[reason] = gaps.get(reason, 0) + samples
 
-    def submit():
-        nonlocal buffer, buffered_samples, quiet_samples, heard_speech
+    def warn_vad():
+        if active():
+            gui.append_message("SYSTEM", "Silero speech detection is unavailable. Using audio level detection for this session.", "ai")
+
+    def observe_speech(chunk, *, flush=False):
+        nonlocal detector, overlap, heard_speech, quiet_samples
+        try:
+            detector.observe(chunk, flush=flush)
+        except Exception:
+            detector, overlap = None, None
+            warn_vad()
+        else:
+            heard_speech, quiet_samples = detector.heard_speech, detector.quiet_samples
+
+    def submit(continuing=False):
+        nonlocal buffer, buffered_samples, quiet_samples, heard_speech, overlap
         if not buffer and not gaps:
             return
+        if detector is not None:
+            observe_speech((), flush=True)
         audio = None
         samples = buffered_samples
-        if buffer:
-            if samples >= 3200 or capture.closed.is_set():
+        confirmed = detector is not None and heard_speech
+        keep_overlap = continuing and confirmed and quiet_samples < pause_samples
+        if buffer and (detector is None or confirmed):
+            if samples >= 3200 or capture.closed.is_set() or confirmed:
                 audio = np.concatenate(buffer).reshape(-1)
             else:
                 add_gap("An interrupted audio fragment was too short to transcribe", samples)
         buffer, buffered_samples = [], 0
         quiet_samples, heard_speech = 0, False
-        job = TranscriptionJob(audio, tuple(gaps.items()))
+        prefix, overlap = overlap, None
+        if audio is None and not gaps:
+            if detector is not None:
+                detector.reset()
+            return
+        prefix_length = 0
+        if audio is not None and prefix is not None and not gaps:
+            prefix_length = len(prefix)
+            audio = np.concatenate((prefix, audio))
+        job = TranscriptionJob(audio, tuple(gaps.items()), confirmed, prefix_length)
         while active():
             try:
                 if capture.closed.is_set():
@@ -1363,11 +1409,21 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
                     add_gap("Transcription backlog dropped audio", samples)
                 break
             else:
+                if keep_overlap and not job.gaps:
+                    overlap = audio[-overlap_samples:].copy()
                 gaps.clear()
                 break
+        if detector is not None:
+            detector.reset(overlap if overlap is not None else ())
         _show_audio_backlog(gui, generation, work_queue)
 
     try:
+        if s.get("silero_vad"):
+            try:
+                from copilot_core.speech_detection import SileroSpeech
+                detector = SileroSpeech(s.get("vad_sensitivity", 0.5))
+            except Exception:
+                warn_vad()
         while active():
             try:
                 position, chunk, overflow = capture.blocks.get(timeout=0.1)
@@ -1381,6 +1437,9 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             if lost or overflow:
                 if buffer:
                     submit()
+                overlap = None
+                if detector is not None:
+                    detector.reset()
                 if lost:
                     add_gap("Audio input buffer overflowed", lost)
                 if overflow:
@@ -1388,7 +1447,9 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             expected_position = position + len(chunk)
             buffer.append(chunk)
             buffered_samples += len(chunk)
-            if np.mean(np.square(chunk)) >= AUDIO_SILENCE_RMS ** 2:
+            if detector is not None:
+                observe_speech(chunk)
+            elif np.mean(np.square(chunk)) >= AUDIO_SILENCE_RMS ** 2:
                 heard_speech = True
                 quiet_samples = 0
             else:
@@ -1396,7 +1457,7 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             # Finish earlier at a natural pause, with the configured cap for continuous speech.
             paused = heard_speech and buffered_samples >= min_pause_chunk and quiet_samples >= pause_samples
             if paused or buffered_samples >= chunk_samples:
-                submit()
+                submit(continuing=not paused)
         if active() and capture.closed.is_set():
             submit()
             # A dropped callback may be the final block, with no later block
@@ -1412,6 +1473,7 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
 
 def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, capture=None):
     """Process one session's chunks serially so transcript order is preserved."""
+    previous_transcribed = False
     while _listen_session_active(generation):
         try:
             job = work_queue.get(timeout=0.1)
@@ -1436,8 +1498,12 @@ def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, captur
             if capture is not None:
                 _show_audio_backlog(gui, generation, work_queue)
             if job.audio is not None and active():
-                if process_audio(job.audio, s, gui, generation, answer_queue, capture) is False:
+                result = process_audio(job.audio, s, gui, generation, answer_queue, capture,
+                                       speech_detected=job.speech_detected,
+                                       overlap_samples=job.overlap_samples if previous_transcribed else 0)
+                if result is False:
                     return
+                previous_transcribed = result is True
         finally:
             work_queue.task_done()
             if capture is not None:
@@ -1514,13 +1580,14 @@ def _is_silence(audio_np, rms_threshold=AUDIO_SILENCE_RMS, min_duration_ms=200, 
     return rms < rms_threshold
 
 
-def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=None):
+def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=None, *,
+                  speech_detected=False, overlap_samples=0):
     overlay_active = gui._active_token() if hasattr(gui, "_active_token") else lambda: True
     active = lambda: overlay_active() and (generation is None or _listen_session_active(generation))
     if not active():
         return
     finishing = capture is not None and capture.closed.is_set()
-    if _is_silence(audio_np, min_duration_ms=0 if finishing else 200):
+    if not speech_detected and _is_silence(audio_np, min_duration_ms=0 if finishing else 200):
         return
 
     def show_status():
@@ -1557,11 +1624,12 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
     try:
         if use_local:
             text = transcribe_local(audio_np, s.get("local_whisper_model", "base"), s.get("language", "en"),
-                                    capture.whisper if capture is not None else None)
+                                    capture.whisper if capture is not None else None, overlap_samples)
         else:
             text = transcribe_groq(audio_np, key,
                                    s.get("language", "en"),
-                                    s.get("whisper_model", "whisper-large-v3-turbo"), active=active)
+                                   s.get("whisper_model", "whisper-large-v3-turbo"), active=active,
+                                   overlap_samples=overlap_samples)
     except Cancelled:
         return
     except WhisperBusy:
@@ -1633,6 +1701,7 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
         _answer_spoken_prompt(gui, text, history_snapshot, dict(s), answers_active, getattr(gui, "_vision_epoch", 0))
     gui._post(show_status)
     gui.update_stats()
+    return True
 
 
 def _answer_spoken_prompt(gui, text, history, settings, active, vision_epoch):

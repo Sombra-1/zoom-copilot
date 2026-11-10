@@ -30,10 +30,18 @@ keep the answer or transcript accessible through the compact layout switch.
   then reopen the app.
 - Local Whisper uses a cancellable process that holds its model for one listening
   session. Canceling a stalled decode reaps that process and lets Local Whisper
-  start again once cleanup finishes. Updated instances coordinate model use,
-  downloads, and deletion through a lock in the configured Hugging Face cache.
+  start again once cleanup finishes. The preview stores its models in the
+  `zoom-copilot-v2.1` folder inside the configured Hugging Face cache so older
+  apps can keep using their own files. The preview downloads its model on first
+  use or through **Audio & transcript**. Preview instances coordinate model
+  use, downloads, and deletion through a lock in that folder.
 - Speech followed by a short pause can reach transcription before the maximum
-  chunk length. Continuous speech still uses the configured maximum.
+  chunk length. Enable **Silero speech detection** in **Audio & transcript** to
+  use the speech model bundled with `faster-whisper`. Adjust speech sensitivity
+  from 0.1 to 0.9. When continuous speech reaches the chunk limit, Silero mode
+  carries up to 320 ms into the next chunk and uses word timestamps to trim
+  text from the repeated audio. If Silero is unavailable, audio level detection
+  stays active for that session.
 
 Open **Zoom Copilot.exe** from the preview folder with Python and the app
 dependencies installed. The setup script creates a separate **Zoom Copilot v2.1

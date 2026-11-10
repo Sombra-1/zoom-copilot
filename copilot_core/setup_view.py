@@ -247,6 +247,20 @@ def build_audio(screen, parent, runtime):
     screen._mic_status.pack(fill="x", pady=5)
     field(screen, device, "Language", "language", "Language code, for example en, ar, fr, or de.")
     field(screen, device, "Maximum audio chunk length", "chunk_seconds", "2–30 seconds. A pause after speech can send audio sooner.")
+    screen._vars["silero_vad"] = enabled = tk.BooleanVar(value=screen.s.get("silero_vad", False))
+    sensitivity = row(device)
+
+    def show_sensitivity():
+        if enabled.get():
+            sensitivity.pack(fill="x")
+        else:
+            sensitivity.pack_forget()
+
+    ctk.CTkSwitch(device, text="Silero speech detection", variable=enabled, command=show_sensitivity,
+                  fg_color=C["border2"], progress_color=C["accent2"], font=("Segoe UI", 12)).pack(anchor="w", pady=8)
+    field(screen, sensitivity, "Speech sensitivity", "vad_sensitivity",
+          "0.1–0.9. Higher values keep quieter speech. Requires the faster-whisper package.")
+    show_sensitivity()
 
 
 def build_whisper_table(screen, parent, runtime):

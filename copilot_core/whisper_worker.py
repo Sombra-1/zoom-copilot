@@ -4,7 +4,7 @@ from contextlib import ExitStack
 import json
 import sys
 
-from .whisper_session import MAX_AUDIO_BYTES, MAX_REQUEST, WhisperBusy, cache_lease
+from .whisper_session import MAX_AUDIO_BYTES, MAX_REQUEST, WhisperBusy, cache_lease, whisper_cache_directory
 
 
 def serve(cache):
@@ -30,13 +30,22 @@ def serve(cache):
                 cache.enter_context(cache_lease())
                 cache_held = True
             if model_name != requested:
-                model = WhisperModel(requested, device="cpu", compute_type="int8")
+                model = WhisperModel(requested, device="cpu", compute_type="int8", download_root=whisper_cache_directory())
                 model_name = requested
             language = request["language"]
             language = language if language and language != "auto" else None
+            overlap = request.get("overlap_samples", 0)
+            if not isinstance(overlap, int) or not 0 <= overlap < len(raw) // 4:
+                raise ValueError("Invalid overlap")
             segments, _ = model.transcribe(np.frombuffer(raw, dtype="<f4").copy(),
-                                           language=language, beam_size=5)
-            response = {"text": " ".join(segment.text for segment in segments).strip()[:10000]}
+                                           language=language, beam_size=5, word_timestamps=bool(overlap))
+            parts = []
+            for segment in segments:
+                if overlap and segment.words:
+                    parts.append("".join(word.word for word in segment.words if word.end * 16000 > overlap))
+                else:
+                    parts.append(segment.text)
+            response = {"text": " ".join(part.strip() for part in parts if part.strip())[:10000]}
         except WhisperBusy as exc:
             response = {"error": str(exc), "busy": True}
         except Exception as exc:

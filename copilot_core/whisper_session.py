@@ -28,13 +28,21 @@ def cache_busy():
     return _cache_lock.locked()
 
 
-def whisper_cache_directory():
+def _hub_cache_directory():
     hub = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
     if hub:
-        return os.path.expanduser(hub)
+        return Path(hub).expanduser().resolve()
     cache_home = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
     hf_home = os.environ.get("HF_HOME") or os.path.join(cache_home, "huggingface")
-    return os.path.join(os.path.expanduser(hf_home), "hub")
+    return (Path(hf_home).expanduser() / "hub").resolve()
+
+
+def whisper_cache_directory():
+    """Keep models apart from older apps that can delete the original cache."""
+    cache = _hub_cache_directory() / "zoom-copilot-v2.1"
+    if cache.resolve() != cache:
+        raise RuntimeError("The Zoom Copilot model cache must not point outside its own folder.")
+    return str(cache)
 
 
 @contextmanager
@@ -92,7 +100,7 @@ class WhisperSession:
         if not _cache_lock.acquire(blocking=False):
             raise WhisperBusy()
         try:
-            env = dict(os.environ, HF_HUB_CACHE=str(Path(whisper_cache_directory()).resolve()))
+            env = dict(os.environ, HF_HUB_CACHE=str(_hub_cache_directory()))
             owner = OwnedProcess([sys.executable, "-m", "copilot_core.whisper_worker"],
                                  cwd=str(Path(__file__).resolve().parents[1]), stdin=subprocess.PIPE,
                                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
@@ -106,7 +114,7 @@ class WhisperSession:
         self._reap(owner)
         raise Cancelled("Local transcription canceled")
 
-    def transcribe(self, audio, model, language):
+    def transcribe(self, audio, model, language, overlap_samples=0):
         import numpy as np
 
         samples = np.asarray(audio, dtype="<f4").reshape(-1)
@@ -117,7 +125,7 @@ class WhisperSession:
         if owner is None:
             owner = self._start()
         payload = {"audio": base64.b64encode(samples.tobytes()).decode("ascii"),
-                   "model": model, "language": language}
+                   "model": model, "language": language, "overlap_samples": overlap_samples}
         try:
             owner.process.stdin.write(json.dumps(payload).encode("utf-8") + b"\n")
             owner.process.stdin.flush()

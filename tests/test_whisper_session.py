@@ -13,6 +13,7 @@ from unittest import mock
 
 import numpy as np
 
+from zoom_copilot import delete_whisper_model
 from copilot_core.codex_client import Cancelled
 from copilot_core.processes import OwnedProcess
 from copilot_core.whisper_session import WhisperBusy, WhisperSession, cache_busy, model_maintenance
@@ -30,11 +31,13 @@ class WhisperModel:
         with marker.open("a", encoding="utf-8") as log:
             log.write(str(os.getpid()) + "\\n")
 
-    def transcribe(self, audio, **_kwargs):
+    def transcribe(self, audio, **kwargs):
         if audio[0] > 0.75:
             Path(os.environ["COPILOT_TEST_WHISPER_STALLED"]).touch()
             threading.Event().wait()
-        return [SimpleNamespace(text="Recovered local audio.")], None
+        words = [SimpleNamespace(word=" Earlier", end=0.1), SimpleNamespace(word=" crossing", end=0.3)]
+        segment = SimpleNamespace(text="Recovered local audio.", words=words if kwargs.get("word_timestamps") else None)
+        return [segment], None
 '''
 
 MAINTENANCE_PROBE = '''
@@ -126,6 +129,7 @@ class WhisperSessionTests(unittest.TestCase):
                     chunk = np.full(4000, 0.5, dtype=np.float32)
                     for _ in range(2):
                         self.assertEqual(next_session.transcribe(chunk, "base", "en"), "Recovered local audio.")
+                    self.assertEqual(next_session.transcribe(chunk, "base", "en", overlap_samples=3200), "crossing")
                     process_ids = loads.read_text(encoding="utf-8").splitlines()
                     self.assertEqual(len(process_ids), 2)
                     self.assertNotEqual(*process_ids)
@@ -135,6 +139,19 @@ class WhisperSessionTests(unittest.TestCase):
 
     def maintenance_probe(self):
         return subprocess.check_output([sys.executable, "-c", MAINTENANCE_PROBE], text=True, timeout=8).strip()
+
+    def test_preview_deletes_its_copy_and_leaves_legacy_files_intact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            hub = Path(directory)
+            legacy = hub / "models--Systran--faster-whisper-tiny"
+            preview = hub / "zoom-copilot-v2.1" / legacy.name
+            for model in (legacy, preview):
+                model.mkdir(parents=True)
+                (model / "model.bin").write_bytes(b"test model")
+            with mock.patch.dict(os.environ, {"HF_HUB_CACHE": directory}):
+                delete_whisper_model("tiny")
+            self.assertFalse(preview.exists())
+            self.assertEqual((legacy / "model.bin").read_bytes(), b"test model")
 
     @unittest.skipUnless(os.name == "nt", "Windows launcher")
     def test_native_launcher_round_trips_local_whisper_audio(self):

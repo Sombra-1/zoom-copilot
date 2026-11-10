@@ -103,7 +103,7 @@ class RuntimeTests(unittest.TestCase):
         work.put(copilot.TranscriptionJob(np.array([2], dtype=np.float32)))
         processed = []
 
-        def record(audio, _settings, _gui, _generation, _answers, _capture):
+        def record(audio, _settings, _gui, _generation, _answers, _capture, **_options):
             processed.append(int(audio[0]))
 
         with mock.patch.object(copilot, "process_audio", side_effect=record):
@@ -256,6 +256,46 @@ class RuntimeTests(unittest.TestCase):
             copilot._end_listen_session()
             collector.join(2)
 
+    def test_silero_filters_noise_and_overlaps_quiet_speech_across_a_cut(self):
+        generation = copilot._begin_listen_session()
+        capture, work = copilot.AudioInput(), queue.Queue()
+        settings = dict(copilot._default_settings(), chunk_seconds=2, silero_vad=True, vad_sensitivity=0.7)
+        gui = mock.Mock()
+
+        def predict(window):
+            frames = window.reshape(-1, 512)
+            return np.where(np.isclose(frames[:, 0], 0.004), 0.4, 0.05)
+
+        faster_whisper = types.ModuleType("faster_whisper")
+        vad = types.ModuleType("faster_whisper.vad")
+        vad.get_vad_model = lambda: predict
+        noise = np.full((1600, 1), 0.2, dtype=np.float32)
+        quiet = np.full((1600, 1), 0.004, dtype=np.float32)
+        for block in [noise] * 20 + [quiet] * 20 + [quiet] * 2:
+            capture.callback(block, len(block), None, None)
+        capture.close_input()
+        with mock.patch.dict(sys.modules, {"faster_whisper": faster_whisper, "faster_whisper.vad": vad}):
+            copilot.transcribe_loop(settings, gui, generation, capture, work)
+
+        first, tail = work.get_nowait(), work.get_nowait()
+        self.assertTrue(work.empty())
+        self.assertTrue(first.speech_detected and tail.speech_detected)
+        self.assertEqual(first.overlap_samples, 0)
+        self.assertEqual(tail.overlap_samples, 5120)
+        np.testing.assert_array_equal(first.audio, np.tile(quiet[:, 0], 20))
+        np.testing.assert_array_equal(tail.audio, np.r_[first.audio[-5120:], np.tile(quiet[:, 0], 2)])
+
+    def test_groq_overlap_removes_words_that_end_before_the_boundary(self):
+        with mock.patch("urllib.request.urlopen") as request:
+            response = request.return_value.__enter__.return_value
+            response.read.return_value = (b'{"text":"old crossing new","words":['
+                                          b'{"word":"old","end":0.2},{"word":"crossing","end":0.4},'
+                                          b'{"word":"new","end":0.8}]}')
+            text = copilot.transcribe_groq(np.ones(16000, dtype=np.float32), "test-key", overlap_samples=5120)
+        self.assertEqual(text, "crossing new")
+        self.assertIn(b'\r\n\r\nverbose_json\r\n', request.call_args.args[0].data)
+        self.assertIn(b'name="timestamp_granularities[]"\r\n\r\nword\r\n', request.call_args.args[0].data)
+
     def test_queued_vision_prompt_is_cancelled_after_scope_change(self):
         gui = mock.Mock()
         gui._vision_epoch = 2
@@ -278,11 +318,11 @@ class RuntimeTests(unittest.TestCase):
     def test_whisper_cache_uses_hub_override_then_hf_home(self):
         with mock.patch.dict(os.environ, {"HF_HOME": "test-home", "HUGGINGFACE_HUB_CACHE": "legacy",
                                          "HF_HUB_CACHE": "explicit"}, clear=True):
-            self.assertEqual(copilot._get_whisper_cache_dir(), "explicit")
+            self.assertEqual(copilot._get_whisper_cache_dir(), os.path.abspath("explicit/zoom-copilot-v2.1"))
             del os.environ["HF_HUB_CACHE"]
-            self.assertEqual(copilot._get_whisper_cache_dir(), "legacy")
+            self.assertEqual(copilot._get_whisper_cache_dir(), os.path.abspath("legacy/zoom-copilot-v2.1"))
             del os.environ["HUGGINGFACE_HUB_CACHE"]
-            self.assertEqual(copilot._get_whisper_cache_dir(), os.path.join("test-home", "hub"))
+            self.assertEqual(copilot._get_whisper_cache_dir(), os.path.abspath("test-home/hub/zoom-copilot-v2.1"))
 
     def test_long_meeting_notes_feed_all_transcript_batches(self):
         lines = [f"SEGMENT-{number:03} " + "Context for this meeting. " * 6 for number in range(180)]
