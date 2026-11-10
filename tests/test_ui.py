@@ -59,6 +59,23 @@ class UiTests(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         screen.destroy()
 
+    def test_audio_test_recovers_from_device_query_error(self):
+        screen = app.SetupScreen(self.root, app._default_settings(), lambda _: None)
+        main_thread = threading.get_ident()
+        called_on = []
+
+        def fail_query(_):
+            called_on.append(threading.get_ident())
+            raise OSError("Device disconnected")
+
+        with mock.patch.object(app, "find_device", side_effect=fail_query):
+            screen._mic_btn.invoke()
+            self.pump_until(lambda: "Device disconnected" in screen._mic_status.cget("text")
+                            and screen._mic_btn.cget("state") == "normal")
+        self.assertEqual(len(called_on), 1)
+        self.assertNotEqual(called_on[0], main_thread)
+        screen.destroy()
+
     def test_setup_credentials_remain_visible_across_pages_and_bindings_are_cleaned(self):
         binding = self.root.bind("<MouseWheel>", lambda _: None, add="+")
         before = self.root.bind("<MouseWheel>").strip()
@@ -208,6 +225,18 @@ class UiTests(unittest.TestCase):
             overlay_view.adapt_layout(overlay)
             self.root.update()
             self.assertEqual(overlay._layout_mode, mode)
+        self.root.geometry(f"{round(960 * scale)}x{round(650 * scale)}")
+        self.root.update()
+        self.assertEqual(overlay._layout_mode, "activity")
+        overlay_view.toggle_vision(overlay)
+        self.root.update()
+        self.assertEqual(overlay._layout_mode, "split")
+        self.assertTrue(overlay.hud.winfo_ismapped() and overlay.chat.winfo_ismapped())
+        self.assertLess(overlay.hud.winfo_rootx(), overlay.chat.winfo_rootx())
+        overlay_view.toggle_focus(overlay)
+        self.root.update()
+        self.assertFalse(overlay.chat.winfo_ismapped())
+        self.assertEqual(overlay._focus_btn.cget("text"), "Exit focus")
         overlay.destroy()
 
     def test_pinned_answer_survives_history_limit(self):

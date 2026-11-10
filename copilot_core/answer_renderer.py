@@ -44,8 +44,8 @@ def answer_blocks(answer, detail="compact"):
 class AnswerHud(ctk.CTkFrame):
     def __init__(self, parent, settings, colors, dispatcher):
         self.colors, self.settings, self.dispatcher = colors, settings, dispatcher
-        super().__init__(parent, fg_color=colors["panel"], border_width=1,
-                         border_color=colors["border"], corner_radius=12)
+        super().__init__(parent, fg_color=colors.get("elevated", colors["panel"]), border_width=1,
+                         border_color=colors["border2"], corner_radius=15)
         self.answers, self.index, self.pinned = [], -1, False
         self.detail = settings.get("answer_detail", "compact")
         self.font_size = settings.get("answer_font_size", 12)
@@ -58,7 +58,7 @@ class AnswerHud(ctk.CTkFrame):
         self._last_math_width = 0
         bar = row(self)
         bar.pack(fill="x", padx=16, pady=(11, 3))
-        Label(bar, "COPILOT ANSWER", size=10, bold=True, text_color=colors["accent"]).pack(side="left")
+        Label(bar, "Copilot answer", size=12, bold=True, text_color=colors["accent"]).pack(side="left")
         self._buttons = {}
         for label, command, width in (("Clear", self.clear, 48), ("Copy", self.copy, 48),
                                       ("Pin", self.pin, 46), ("›", lambda: self.move(1), 28),

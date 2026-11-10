@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
-APP_ID = "Sombra1.ZoomCopilot.Community"
+APP_ID = "Sombra1.ZoomCopilot.Preview"
 
 
 def set_process_identity():
@@ -70,3 +70,23 @@ def tray_icon():
             return source.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
     except (ImportError, OSError):
         return None
+
+
+def signal_label(parent):
+    """A static 3D illustration with a native PNG fallback."""
+    path = ASSETS / "signal-depth.png"
+    try:
+        import customtkinter as ctk
+        from PIL import Image
+        with Image.open(path) as source:
+            art = source.convert("RGBA")
+        picture = ctk.CTkImage(light_image=art, dark_image=art, size=(210, 108))
+        return ctk.CTkLabel(parent, text="", image=picture, width=210, height=108)
+    except (ImportError, OSError):
+        try:
+            picture = tk.PhotoImage(master=parent, file=str(path)).subsample(2, 2)
+            label = tk.Label(parent, image=picture, bg=parent.cget("fg_color"), bd=0, highlightthickness=0)
+            label._signal_image = picture
+            return label
+        except (OSError, tk.TclError):
+            return None

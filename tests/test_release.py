@@ -108,11 +108,14 @@ class RuntimeReleaseTests(unittest.TestCase):
         with mock.patch.object(app, "load_settings", side_effect=lambda: dict(app._default_settings(), backend="demo")):
             gui = app.App()
         icon, stream = mock.Mock(), mock.Mock()
+        closed = threading.Event()
+        stream.close.side_effect = closed.set
         gui._tray_icon = icon
         with mock.patch.object(app, "stream", stream):
             try:
                 gui._quit()
                 gui._quit()
+                self.assertTrue(closed.wait(2))
                 icon.stop.assert_called_once()
                 stream.stop.assert_called_once()
                 stream.close.assert_called_once()

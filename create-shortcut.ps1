@@ -1,4 +1,4 @@
-param([string]$PythonPath, [string]$ShortcutName = 'Zoom Co-Pilot')
+param([string]$PythonPath, [string]$ShortcutName = 'Zoom Copilot v2.1 Preview')
 $ErrorActionPreference = 'Stop'
 $taskRepo = $PSScriptRoot
 if (-not $PythonPath) {

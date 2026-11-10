@@ -33,6 +33,7 @@ import threading
 import queue
 import json
 import os
+from pathlib import Path
 import sys
 import time
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from copilot_core.answer_schema import Answer, parse_answer
 from copilot_core.ui_dispatch import UiDispatcher
 from copilot_core.diagnostics import record_failure
 from copilot_core.processes import quiet_process_options
+from copilot_core.whisper_session import WhisperSession, WhisperBusy, cache_busy, model_maintenance
 from copilot_core.community import CommunitySupport
 from copilot_core.updates import UpdateChecker
 from copilot_core.branding import set_process_identity, apply_window_icon, tray_icon
@@ -82,6 +84,7 @@ conversation_history = []
 _history_lock        = threading.Lock()    # guards conversation_history
 _listen_event        = threading.Event()   # replaces bool flag — thread-safe
 stream               = None
+_audio_device_closing = threading.Event()
 _listen_generation   = 0
 _listen_generation_lock = threading.Lock()
 AUDIO_DRAIN_TIMEOUT_MS = 60_000
@@ -962,6 +965,8 @@ def list_linux_sources():
 def list_windows_devices():
     """Return list of (name, kind_label) for all input-capable devices on Windows.
     kind_label is one of: 'VB-Cable', 'Stereo Mix', 'Loopback', 'Microphone'."""
+    if _audio_device_closing.is_set():
+        return []
     try:
         import sounddevice as sd
         results = []
@@ -990,6 +995,8 @@ def find_best_capture_device():
     """Auto-detect the best available audio capture device.
     Priority: VB-Cable → Stereo Mix → any loopback → default system input → first input.
     Returns (device_name, method_label) or (None, None) if nothing found."""
+    if _audio_device_closing.is_set():
+        return None, None
     try:
         import sounddevice as sd
         devices = sd.query_devices()
@@ -1043,15 +1050,45 @@ def _close_audio_stream(device):
     return failed
 
 
+def _close_audio_in_background(device, report=None):
+    _audio_device_closing.set()
+
+    def close():
+        try:
+            for operation in _close_audio_stream(device):
+                if report is not None:
+                    report(operation)
+        finally:
+            _audio_device_closing.clear()
+
+    threading.Thread(target=close, name="copilot-audio-device-close", daemon=True).start()
+
+
+def _detach_audio_stream(report=None):
+    global stream
+    device, stream = stream, None
+    if device is not None:
+        _close_audio_in_background(device, report)
+
+
 def find_device(name):
-    if not isinstance(name, str) or not name.strip():
+    if _audio_device_closing.is_set() or not isinstance(name, str) or not name.strip():
         return None
     name = name.strip()
     import sounddevice as sd
-    # Direct match — works on Windows (WASAPI) and ALSA
+    # Prefer an exact input name, while retaining saved partial names.
+    name_key = name.casefold()
+    partial = None
     for i, d in enumerate(sd.query_devices()):
-        if name.lower() in d["name"].lower() and d["max_input_channels"] > 0:
+        if d["max_input_channels"] <= 0:
+            continue
+        device_key = d["name"].casefold()
+        if name_key == device_key:
             return i
+        if partial is None and name_key in device_key:
+            partial = i
+    if partial is not None:
+        return partial
     # Linux/PipeWire fallback: PortAudio can't see PulseAudio sources by name,
     # so set the source as PulseAudio default and use the PipeWire bridge device.
     if sys.platform != "win32":
@@ -1075,6 +1112,8 @@ class AudioInput:
 
     def __init__(self):
         self.blocks = queue.Queue(maxsize=256)
+        self._input_lock = threading.Lock()
+        self.whisper = WhisperSession()
         self.closed = threading.Event()
         self.collected = threading.Event()
         self.finished = threading.Event()
@@ -1084,16 +1123,21 @@ class AudioInput:
         self.overflow_pending = False
 
     def callback(self, indata, frames, _time_info, status):
-        if self.closed.is_set():
-            return
-        position = self.position
-        self.position += frames
-        self.overflow_pending |= bool(getattr(status, "input_overflow", False))
-        try:
-            self.blocks.put_nowait((position, indata.copy(), self.overflow_pending))
-        except queue.Full:
-            return
-        self.overflow_pending = False
+        with self._input_lock:
+            if self.closed.is_set():
+                return
+            position = self.position
+            self.position += frames
+            self.overflow_pending |= bool(getattr(status, "input_overflow", False))
+            try:
+                self.blocks.put_nowait((position, indata.copy(), self.overflow_pending))
+            except queue.Full:
+                return
+            self.overflow_pending = False
+
+    def close_input(self):
+        with self._input_lock:
+            self.closed.set()
 
 
 def _numpy_to_wav_bytes(audio_np):
@@ -1157,14 +1201,6 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
 
 # Size guide: tiny=~40MB, base=~150MB, small=~500MB, medium=~1.5GB, large-v2=~3GB
 
-_local_whisper_model_cache = {}   # model_name → loaded model instance
-_local_whisper_inference = threading.Lock()
-_LOCAL_WHISPER_BUSY = (
-    "Local Whisper is still working on an earlier session. "
-    "Wait for it to finish, restart Zoom Copilot, or select Groq transcription."
-)
-
-
 # ── Whisper model cache management ───────────────────────────────────────────
 
 def _get_whisper_cache_dir():
@@ -1192,36 +1228,32 @@ def is_whisper_model_downloaded(model_name):
     return False
 
 def delete_whisper_model(model_name):
-    """Delete cached model files for model_name and evict it from the in-memory cache."""
+    """Delete cached model files while the local decoder is idle."""
     import shutil
+    if model_name not in LOCAL_WHISPER_MODELS:
+        raise ValueError("Unknown Whisper model")
     folder = os.path.join(_get_whisper_cache_dir(),
                           f"models--Systran--faster-whisper-{model_name}")
-    if os.path.isdir(folder):
-        shutil.rmtree(folder)
-    _local_whisper_model_cache.pop(model_name, None)
+    with model_maintenance():
+        if os.path.isdir(folder):
+            shutil.rmtree(folder)
 
 def download_whisper_model(model_name, progress_cb):
     """Pre-download a faster-whisper model without transcribing anything."""
     from faster_whisper import WhisperModel
-    progress_cb(f"Downloading {model_name}…")
-    model = WhisperModel(model_name, device="cpu", compute_type="int8")
-    _local_whisper_model_cache[model_name] = model
+    with model_maintenance():
+        progress_cb(f"Downloading {model_name}…")
+        WhisperModel(model_name, device="cpu", compute_type="int8")
 
 
-def transcribe_local(audio_np, model_name="base", language="en"):
-    """Transcribe using faster-whisper running locally — no internet needed."""
-    from faster_whisper import WhisperModel
-    import numpy as np
-
-    if model_name not in _local_whisper_model_cache:
-        _local_whisper_model_cache[model_name] = WhisperModel(
-            model_name, device="cpu", compute_type="int8"
-        )
-    model = _local_whisper_model_cache[model_name]
-    audio_np = audio_np.astype(np.float32)
-    lang = language if language and language != "auto" else None
-    segments, _ = model.transcribe(audio_np, language=lang, beam_size=5)
-    return " ".join(seg.text for seg in segments).strip()
+def transcribe_local(audio_np, model_name="base", language="en", session=None):
+    """Transcribe locally and retain the model for the current listening run."""
+    worker = session if session is not None else WhisperSession()
+    try:
+        return worker.transcribe(audio_np, model_name, language)
+    finally:
+        if session is None:
+            worker.close()
 
 
 def faster_whisper_installed():
@@ -1518,25 +1550,21 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
     gui.set_status("Transcribing...", C["warn"])
     try:
         if use_local:
-            if not _local_whisper_inference.acquire(blocking=False):
-                def busy():
-                    if active():
-                        gui.append_message("ERROR", _LOCAL_WHISPER_BUSY, "error")
-                        gui._stop(drain=False)
-                gui._post(busy)
-                return False
-            try:
-                if not active():
-                    return
-                text = transcribe_local(audio_np, s.get("local_whisper_model", "base"), s.get("language", "en"))
-            finally:
-                _local_whisper_inference.release()
+            text = transcribe_local(audio_np, s.get("local_whisper_model", "base"), s.get("language", "en"),
+                                    capture.whisper if capture is not None else None)
         else:
             text = transcribe_groq(audio_np, key,
                                    s.get("language", "en"),
                                     s.get("whisper_model", "whisper-large-v3-turbo"), active=active)
     except Cancelled:
         return
+    except WhisperBusy:
+        def busy():
+            if active():
+                gui.append_message("ERROR", str(WhisperBusy()), "error")
+                gui._stop(drain=False)
+        gui._post(busy)
+        return False
     except Exception as e:
         if not active():
             return
@@ -2273,31 +2301,27 @@ class SetupScreen(tk.Frame):
             self._mic_status.config(text="✗ sounddevice not installed  →  pip install sounddevice numpy", fg=C["error"])
             return
 
-        dev_idx = find_device(device_name)
-        if dev_idx is None:
-            hint = "Install VB-Cable and set Zoom speaker to 'CABLE Input'" if sys.platform == "win32" else "Run the pactl setup commands first"
-            self._mic_status.config(
-                    text=f"✗ Device '{device_name}' not found. {hint}.", fg=C["error"])
-            return
-
         self._mic_btn.config(state="disabled")
-        self._mic_status.config(text="Listening...", fg=C["warn"])
+        self._mic_status.config(text="Checking audio device…", fg=C["warn"])
         self._vol_canvas.pack(side="left")
 
         DURATION   = 3      # seconds
         SAMPLERATE = 16000
         CHUNK      = 1024
-        peak_seen  = [0.0]
-
         def run():
+            peak_seen = 0.0
             frames_total = int(SAMPLERATE * DURATION / CHUNK)
             try:
+                dev_idx = find_device(device_name)
+                if dev_idx is None:
+                    raise RuntimeError(f"Device '{device_name}' is unavailable. Check the input selection and try again.")
+                self._post(lambda: self._mic_status.config(text="Listening…", fg=C["warn"]))
                 with sd.InputStream(samplerate=SAMPLERATE, channels=1,
                                     device=dev_idx, blocksize=CHUNK) as st:
                     for _ in range(frames_total):
                         data, _ = st.read(CHUNK)
                         level = float(np.abs(data).mean())
-                        peak_seen[0] = max(peak_seen[0], level)
+                        peak_seen = max(peak_seen, level)
                         # update bar on main thread
                         bar_w = min(int(level * 2000), 160)
                         color = C["success"] if level > 0.002 else C["error"]
@@ -2305,24 +2329,19 @@ class SetupScreen(tk.Frame):
                             self._vol_canvas.coords(self._vol_bar, 0, 0, w, 14),
                             self._vol_canvas.itemconfig(self._vol_bar, fill=c),
                         ))
-            except Exception as e:
-                err = str(e)
-                self._post(lambda: self._mic_status.config(
-                    text=f"✗ Error: {err}", fg=C["error"]))
-                self._post(lambda: self._mic_btn.config(state="normal"))
-                return
-
-            # Final verdict
-            if peak_seen[0] > 0.002:
-                msg  = f"✓ Audio detected! Peak level: {peak_seen[0]:.4f}"
-                col  = C["success"]
+            except Exception as exc:
+                message, color = f"✗ Error: {exc}", C["error"]
             else:
-                msg  = "✗ No audio detected — check device or play something in Zoom"
-                col  = C["error"]
+                if peak_seen > 0.002:
+                    message, color = f"✓ Audio detected! Peak level: {peak_seen:.4f}", C["success"]
+                else:
+                    message, color = "✗ No audio detected — check device or play something in Zoom", C["error"]
 
-            self._post(lambda: self._mic_status.config(text=msg, fg=col))
-            self._post(lambda: self._vol_canvas.coords(self._vol_bar, 0, 0, 0, 14))
-            self._post(lambda: self._mic_btn.config(state="normal"))
+            def finish():
+                self._mic_status.config(text=message, fg=color)
+                self._vol_canvas.coords(self._vol_bar, 0, 0, 0, 14)
+                self._mic_btn.config(state="normal")
+            self._post(finish)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -2874,7 +2893,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
         overlay_view.refresh_vision_controls(self)
 
     def toggle_listening(self):
-        if not _listen_event.is_set():
+        if self._audio_is_finishing():
+            self._cancel_audio_drain()
+        elif not _listen_event.is_set():
             self._go_live()
         else:
             self._stop()
@@ -2882,6 +2903,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
     def _go_live(self):
         global stream
         if _listen_event.is_set():
+            return
+        if _audio_device_closing.is_set():
+            self.set_status("Audio device is still closing", C["warn"])
             return
         try:
             import sounddevice as sd
@@ -2898,11 +2922,16 @@ class OverlayScreen(OverlayServices, tk.Frame):
         if self.s.get("transcription") == "local" and self.s.get("backend") != "demo" and not faster_whisper_installed():
             self.append_message("ERROR", "Install Local Whisper in Settings → Audio & transcript before starting audio.", "error")
             return
-        if self.s.get("transcription") == "local" and _local_whisper_inference.locked():
-            self.append_message("ERROR", _LOCAL_WHISPER_BUSY, "error")
+        if self.s.get("transcription") == "local" and cache_busy():
+            self.append_message("ERROR", str(WhisperBusy()), "error")
             return
 
-        dev_idx = find_device(self.s["device_name"])
+        try:
+            dev_idx = find_device(self.s["device_name"])
+        except Exception as exc:
+            self.append_message("ERROR", f"Could not query audio devices: {exc}", "error")
+            self.set_status("Audio device unavailable", C["error"])
+            return
         if dev_idx is None:
             if sys.platform == "win32":
                 hint = "Install VB-Cable from vb-audio.com/Cable, then set your meeting app speaker to 'CABLE Input'."
@@ -2951,8 +2980,10 @@ class OverlayScreen(OverlayServices, tk.Frame):
             ).start()
         except Exception as e:
             _end_listen_session()
+            capture.close_input()
+            capture.whisper.close()
             if new_stream is not None:
-                _close_audio_stream(new_stream)
+                _close_audio_in_background(new_stream)
             stream = None
             self._audio_input = None
             self.append_message("ERROR", f"Could not start audio capture: {e}", "error")
@@ -2972,11 +3003,11 @@ class OverlayScreen(OverlayServices, tk.Frame):
         return self._audio_input is not None and self._audio_input.closed.is_set()
 
     def _close_listening_stream(self):
-        global stream
-        if stream:
-            for operation in _close_audio_stream(stream):
+        active = self._active_token()
+        def report(operation):
+            if active():
                 self.append_message("ERROR", f"Audio stream {operation} failed. Local diagnostics recorded the failure.", "error")
-            stream = None
+        _detach_audio_stream(report)
 
     def _stop(self, *, drain=True):
         if drain and self._audio_is_finishing():
@@ -2987,10 +3018,10 @@ class OverlayScreen(OverlayServices, tk.Frame):
         overlay_view.refresh_vision_controls(self)
         capture = self._audio_input
         if drain and capture is not None:
-            self._close_listening_stream()
             capture.last_progress = time.monotonic()
-            capture.closed.set()
-            self.toggle_btn.config(text="Cancel finishing", state="normal", command=self._cancel_audio_drain)
+            capture.close_input()
+            self._close_listening_stream()
+            self.toggle_btn.config(text="Cancel finishing", state="normal")
             self.set_status("Finishing audio…", C["warn"])
             generation = _listen_generation
             self._audio_drain_timer = self._later(AUDIO_DRAIN_TIMEOUT_MS,
@@ -3029,18 +3060,19 @@ class OverlayScreen(OverlayServices, tk.Frame):
         if timer is not None:
             self.after_cancel(timer)
             self._ui_timers.discard(timer)
-        self._close_listening_stream()
         if self._audio_input is not None:
             current, self._audio_input = self._audio_input, None
-            current.closed.set()
+            current.close_input()
+            current.whisper.close()
             if gap_reason:
                 _record_audio_gap(self, lambda: True, gap_reason, capture=current)
             _flush_audio_rows(self, current)
+        self._close_listening_stream()
         self._invalidate_requests()
         with _stats_lock:
             session_stats["queued_audio"] = 0
         self.toggle_btn.config(text="Start listening", state="normal", bg=C["accent2"], fg="#ffffff",
-                               activebackground="#7b8ff0", activeforeground="#ffffff", command=self.toggle_listening)
+                               activebackground="#7b8ff0", activeforeground="#ffffff")
         self.set_status("Stopped · partial transcript available" if gap_reason else "Stopped",
                         C["warn"] if gap_reason else C["fg2"])
         self.append_message("SYSTEM", "Stopped.", "ai")
@@ -3052,7 +3084,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
 # ================================================================================
 
 class App:
-    def __init__(self, support_state_file=None, update_state_file=None, check_updates=True):
+    def __init__(self, support_state_file=None, update_state_file=None, check_updates=False):
         set_process_identity()
         configure_theme()
         self.root = ctk.CTk()
@@ -3066,8 +3098,10 @@ class App:
         self.root.attributes("-topmost", True)
         self.root.resizable(True, True)
         self.current = None
-        if update_state_file is None and support_state_file is not None:
-            from pathlib import Path
+        if support_state_file is None:
+            state_root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "state")
+            support_state_file = state_root / "ZoomCopilotPreview" / "community-support.json"
+        if update_state_file is None:
             update_state_file = Path(support_state_file).with_name("updates.json")
         self._updates = UpdateChecker(self.root, lambda: self.current, update_state_file, enabled=check_updates)
         self.root._updates = self._updates
@@ -3105,15 +3139,18 @@ class App:
         self.root.bind("<Button-1>",  _start_drag)
         self.root.bind("<B1-Motion>", _do_drag)
 
+    def _discard_workspace_audio(self):
+        _end_listen_session()
+        capture = getattr(self.current, "_audio_input", None)
+        if capture is not None:
+            capture.close_input()
+            capture.whisper.close()
+        _detach_audio_stream()
+
     def _show_setup(self):
         self._community.pause()
-        # Stop any active audio + screen watch before switching screens
-        _end_listen_session()
+        self._discard_workspace_audio()
         _end_screen_session()
-        global stream
-        if stream:
-            _close_audio_stream(stream)
-            stream = None
         if self.current:
             self.current.destroy()
         self.root.attributes("-alpha", 1.0)
@@ -3122,13 +3159,12 @@ class App:
         self._updates.sync()
 
     def _launch(self, settings):
+        self._discard_workspace_audio()
         if self.current:
             self.current.destroy()
-        # Reset shared state so a re-launch starts clean
-        _end_listen_session()
         with _history_lock:
             conversation_history.clear()
-        fit_window(self.root, 850, 740, minimum=(680, 560))
+        fit_window(self.root, 960, 740, minimum=(680, 560))
         self.current = OverlayScreen(
             self.root, dict(settings, vision_mode="off"),
             on_settings=self._show_setup,
@@ -3261,7 +3297,7 @@ class App:
         self._quitting = True
         self._updates.close()
         self._community.close()
-        _end_listen_session()
+        self._discard_workspace_audio()
         _end_screen_session()
         try:
             alive = bool(self.root.winfo_exists())
@@ -3281,10 +3317,6 @@ class App:
             except Exception:
                 record_failure(sys.exc_info(), "view-close")
             self.current = None
-        global stream
-        if stream:
-            _close_audio_stream(stream)
-            stream = None
         CODEX.close()
         self.root._dispatcher.close()
         if alive:
@@ -3315,4 +3347,4 @@ if __name__ == "__main__":
                 ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
                 pass
-    App().run()
+    App(check_updates=True).run()

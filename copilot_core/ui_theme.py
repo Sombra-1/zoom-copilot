@@ -3,12 +3,13 @@ import tkinter as tk
 import customtkinter as ctk
 
 COLORS = {
-    "bg": "#101114", "panel": "#191b20", "panel2": "#24272e",
-    "border": "#2b2e36", "border2": "#414652", "accent": "#9baeff",
-    "accent2": "#697fea", "accent3": "#a99af7", "them": "#d1d5df",
-    "ai": "#e5e9f3", "error": "#f295a4", "success": "#8bd5b2",
-    "warn": "#e6c488", "fg": "#f1f2f6", "fg2": "#9399a8",
-    "btn_hover": "#303642", "input_bg": "#1d2026", "input_fg": "#ecedf2",
+    "bg": "#0b101a", "panel": "#151e2e", "panel2": "#202c43",
+    "elevated": "#192540", "inset": "#101827", "sidebar": "#121a2b",
+    "border": "#2b3a55", "border2": "#455777", "accent": "#aebfff",
+    "accent2": "#625ee5", "accent3": "#a9a1ff", "them": "#d6e0f0",
+    "ai": "#eaf0ff", "error": "#ff9bab", "success": "#89e1c2",
+    "warn": "#f2ca91", "fg": "#f3f6ff", "fg2": "#a8b6cf",
+    "btn_hover": "#304261", "input_bg": "#101827", "input_fg": "#edf2ff",
 }
 FONT = "Segoe UI"
 
@@ -30,9 +31,10 @@ def _translate(options):
 class Button(ctk.CTkButton):
     """Accept the existing controller's .config(bg=..., fg=...) updates."""
     def __init__(self, parent, text="", command=None, primary=False, quiet=False, **kwargs):
-        defaults = dict(width=100, height=34, corner_radius=8, border_width=0,
+        defaults = dict(width=100, height=34, corner_radius=9, border_width=0 if quiet else 1,
+                        border_color="#9695ff" if primary else COLORS["border"],
                         fg_color=COLORS["accent2"] if primary else ("transparent" if quiet else COLORS["panel2"]),
-                        hover_color="#7b8ff0" if primary else COLORS["btn_hover"],
+                        hover_color="#7774ef" if primary else COLORS["btn_hover"],
                         text_color="#ffffff" if primary else COLORS["fg"],
                         font=(FONT, 13), anchor="center")
         defaults.update(kwargs)
@@ -60,13 +62,14 @@ class Label(ctk.CTkLabel):
 
 
 def card(parent, **kwargs):
-    options = dict(fg_color=COLORS["panel"], border_color=COLORS["border"], border_width=1, corner_radius=12)
+    options = dict(fg_color=COLORS["panel"], border_color=COLORS["border"], border_width=1, corner_radius=15)
     options.update(kwargs)
     return ctk.CTkFrame(parent, **options)
 
 
 def row(parent, **kwargs):
-    return ctk.CTkFrame(parent, fg_color="transparent", **kwargs)
+    kwargs.setdefault("fg_color", "transparent")
+    return ctk.CTkFrame(parent, **kwargs)
 
 
 def entry(parent, variable, secret=False, width=260):
@@ -85,18 +88,18 @@ def select(parent, variable, values, command=None, width=150):
 
 def text_surface(parent, height=5, **kwargs):
     """Keep Tk's rich-text API for selection, math images and syntax tags."""
-    wrapper = row(parent)
+    wrapper = row(parent, fg_color=COLORS["inset"], corner_radius=8)
     scale = wrapper._get_widget_scaling()
-    text = tk.Text(wrapper, height=height, bg=COLORS["panel"], fg=COLORS["fg"],
+    text = tk.Text(wrapper, height=height, bg=COLORS["inset"], fg=COLORS["fg"],
                    insertbackground=COLORS["accent"], relief="flat", bd=0,
                    highlightthickness=0, selectbackground="#3e496c", wrap="word",
-                   font=(FONT, -round(14 * scale)), padx=4, pady=6, **kwargs)
+                   font=(FONT, -round(14 * scale)), padx=6, pady=6, **kwargs)
     scrollbar = ctk.CTkScrollbar(wrapper, command=text.yview, width=10,
                                  fg_color="transparent", button_color=COLORS["border2"],
                                  button_hover_color=COLORS["fg2"])
     text.configure(yscrollcommand=scrollbar.set)
     scrollbar.pack(side="right", fill="y", padx=(4, 0))
-    text.pack(fill="both", expand=True)
+    text.pack(fill="both", expand=True, padx=(4, 0), pady=2)
     return wrapper, text
 
 

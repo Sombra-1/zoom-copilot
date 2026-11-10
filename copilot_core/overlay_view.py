@@ -14,12 +14,14 @@ def build(screen):
     screen.configure(bg=C["bg"])
     screen.grid_columnconfigure(0, weight=1)
     screen.grid_rowconfigure(2, weight=1)
-    header = row(screen)
-    header.grid(row=0, column=0, sticky="ew", padx=22, pady=(18, 10))
+    header_surface = card(screen, fg_color=C["elevated"], border_color="#3b4d74")
+    header_surface.grid(row=0, column=0, sticky="ew", padx=20, pady=(12, 7))
+    header = row(header_surface)
+    header.pack(fill="x", padx=13, pady=5)
     logo_label(header, size=28).pack(side="left", padx=(0, 10))
     Label(header, "Zoom Copilot", size=20, bold=True).pack(side="left")
     provider = screen.s["backend"].title()
-    Label(header, provider, size=11, text_color=C["accent"], fg_color="#252b42", corner_radius=6,
+    Label(header, provider, size=11, text_color=C["accent"], fg_color=C["inset"], corner_radius=7,
           padx=9, width=72, height=26).pack(side="left", padx=12)
     Button(header, "Settings", command=screen.on_settings, width=78, quiet=True).pack(side="right")
     if screen.on_toggle_capture and runtime["sys"].platform == "win32":
@@ -27,7 +29,7 @@ def build(screen):
                                      width=136, height=30, quiet=True, text_color=C["fg2"])
         screen._capture_btn.pack(side="right", padx=4)
     status = row(screen)
-    status.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 12))
+    status.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 7))
     screen.status_lbl = Label(status, "●  Ready", size=12, muted=True, wraplength=550, justify="left")
     screen.status_lbl.pack(side="left", fill="x", expand=True)
     privacy, _, _ = runtime["privacy_mode_label"](screen.s)
@@ -47,10 +49,14 @@ def build(screen):
     screen._transcript_card.grid(row=1, column=0, sticky="nsew")
     log_header = row(screen._transcript_card)
     log_header.pack(fill="x", padx=12, pady=(10, 4))
-    build_filters(screen, log_header)
-    screen._notes_btn = Button(log_header, "Make notes", command=screen._generate_meeting_notes, width=100, height=29, quiet=True)
+    screen._filter_row = row(log_header)
+    screen._filter_row.pack(side="left")
+    build_filters(screen, screen._filter_row)
+    screen._activity_actions = row(log_header)
+    screen._activity_actions.pack(side="right")
+    screen._notes_btn = Button(screen._activity_actions, "Make notes", command=screen._generate_meeting_notes, width=100, height=29, quiet=True)
     screen._notes_btn.pack(side="right", padx=3)
-    menu_button = Button(log_header, "···", width=32, height=29, quiet=True)
+    menu_button = Button(screen._activity_actions, "···", width=32, height=29, quiet=True)
     menu_button.pack(side="right")
     wrapper, screen.chat = text_surface(screen._transcript_card, height=4, state="disabled", cursor="arrow")
     wrapper.pack(fill="both", expand=True, padx=12, pady=(2, 9))
@@ -71,7 +77,7 @@ def build(screen):
     screen.chat.bind("<Button-3>", lambda e: screen._ctx_menu.tk_popup(e.x_root, e.y_root))
     screen._autoscroll = [True]
     screen._render_chat_log()
-    screen._scroll_btn = Button(log_header, "Follow", command=screen._toggle_autoscroll, width=62, height=29, quiet=True)
+    screen._scroll_btn = Button(screen._activity_actions, "Follow", command=screen._toggle_autoscroll, width=62, height=29, quiet=True)
     screen._scroll_btn.pack(side="right", padx=3)
     # Privacy stays visible even while the optional controls are collapsed.
     vision_header = row(screen)
@@ -98,7 +104,7 @@ def build(screen):
     screen._vision_expanded = screen.s.get("vision_mode", "off") != "off"
     if not screen._vision_expanded:
         screen._vision_frame.grid_remove()
-    compose = card(screen)
+    compose = card(screen, fg_color=C["inset"], border_color=C["border2"])
     compose.grid(row=5, column=0, sticky="ew", padx=20, pady=(4, 10))
     build_composer(screen, compose)
     refresh_vision_controls(screen)
@@ -239,13 +245,27 @@ def adapt_layout(screen):
     # A stable shared budget prevents a resize loop when compacting the
     # composer gives space back to the answer panel near the breakpoint.
     available = screen._body.winfo_height() + screen._composer.winfo_height()
-    screen._auto_compact = available < 460 * screen._body._get_widget_scaling()
+    scale = screen._body._get_widget_scaling()
+    split = screen._body.winfo_width() >= 894 * scale and available >= 350 * scale
+    screen._auto_compact = available < 460 * scale and not split
+    line_limit = 2 if available < 280 * scale else 3 if screen._auto_compact else 5
+    if line_limit != screen._composer_line_limit:
+        screen._composer_line_limit = line_limit
+        resize_composer(screen)
     mode = "activity" if screen._auto_compact and screen._compact_activity else (
-        "answer" if screen._auto_compact or screen._focus else "both")
+        "answer" if screen._auto_compact or screen._focus else "split" if split else "both")
+    focus_label = {
+        "answer": "Show activity" if screen._auto_compact else "Exit focus",
+        "activity": "Show answer",
+        "split": "Focus view",
+        "both": "Focus view",
+    }[mode]
+    if screen._focus_btn.cget("text") != focus_label:
+        screen._focus_btn.config(text=focus_label)
     if mode == screen._layout_mode:
         return
     screen._layout_mode = mode
-    compact = mode != "both"
+    compact = mode in ("answer", "activity")
     screen._composer_content.grid_configure(columnspan=1 if compact else 2)
     screen._composer_send.grid_configure(row=0 if compact else 1, column=1,
                                          pady=(10, 10) if compact else (0, 10))
@@ -253,22 +273,36 @@ def adapt_layout(screen):
         screen._composer_hint.grid_remove()
     else:
         screen._composer_hint.grid()
+    if mode == "split":
+        screen._body.grid_columnconfigure(0, weight=54, uniform="panels")
+        screen._body.grid_columnconfigure(1, weight=46, uniform="panels")
+        screen._body.grid_rowconfigure(0, weight=1, minsize=0)
+        screen._body.grid_rowconfigure(1, weight=0, minsize=0)
+        screen.hud.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=0)
+        screen._transcript_card.grid(row=0, column=1, sticky="nsew", padx=(6, 0))
+        screen._filter_row.pack_configure(side="top", anchor="w", fill="x")
+        screen._activity_actions.pack_configure(side="top", fill="x", pady=(4, 0))
+        return
+
+    screen._body.grid_columnconfigure(0, weight=1, uniform="")
+    screen._body.grid_columnconfigure(1, weight=0, uniform="")
+    screen._filter_row.pack_configure(side="left", fill="none")
+    screen._activity_actions.pack_configure(side="right", fill="none", pady=0)
     if mode == "answer":
-        screen.hud.grid()
         screen._transcript_card.grid_remove()
+        screen.hud.grid(row=0, column=0, padx=0, pady=0)
         screen._body.grid_rowconfigure(0, weight=1, minsize=0)
         screen._body.grid_rowconfigure(1, weight=0, minsize=0)
     elif mode == "activity":
         screen.hud.grid_remove()
-        screen._transcript_card.grid()
+        screen._transcript_card.grid(row=1, column=0, padx=0)
         screen._body.grid_rowconfigure(0, weight=0, minsize=0)
         screen._body.grid_rowconfigure(1, weight=1, minsize=0)
     else:
-        screen.hud.grid()
-        screen._transcript_card.grid()
+        screen.hud.grid(row=0, column=0, padx=0, pady=(0, 12))
+        screen._transcript_card.grid(row=1, column=0, padx=0)
         screen._body.grid_rowconfigure(0, weight=3, minsize=120)
         screen._body.grid_rowconfigure(1, weight=2, minsize=96)
-    screen._focus_btn.config(text={"answer": "Show activity", "activity": "Show answer", "both": "Focus view"}[mode])
 
 
 def copy_selection(screen):
@@ -277,14 +311,23 @@ def copy_selection(screen):
         screen.master.clipboard_append(screen.chat.get("sel.first", "sel.last"))
 
 
+def resize_composer(screen):
+    entry = screen._manual_entry
+    lines = int(entry.index("end-1c").split(".")[0])
+    height = min(screen._composer_line_limit, max(2, lines))
+    if entry.cget("height") != height:
+        entry.config(height=height)
+
+
 def build_composer(screen, parent):
     screen._composer = parent
+    screen._composer_line_limit = 5
     parent.grid_columnconfigure(0, weight=1)
     content = row(parent)
     content.grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(9, 4))
     screen._composer_content = content
     screen._manual_entry = tk.Text(content, height=2, wrap="word", undo=True, bd=0, relief="flat", highlightthickness=0,
-                                   bg=C["panel"], fg=C["fg2"], insertbackground=C["accent"],
+                                   bg=C["inset"], fg=C["fg2"], insertbackground=C["accent"],
                                    selectbackground="#3e496c", font=("Segoe UI", -round(14 * content._get_widget_scaling())), padx=0, pady=4)
     screen._manual_entry.pack(fill="x")
     screen._input_has_placeholder = True
@@ -304,22 +347,19 @@ def build_composer(screen, parent):
         clear_placeholder()
         try:
             screen._manual_entry.insert(tk.INSERT, screen.master.clipboard_get())
-            resize_input()
+            resize_composer(screen)
         except tk.TclError:
             pass
         return "break"
-    def resize_input(_=None):
-        count = int(screen._manual_entry.index("end-1c").split(".")[0])
-        screen._manual_entry.config(height=min(3 if screen._auto_compact else 5, max(2, count)))
     def newline(_):
         clear_placeholder()
         screen._manual_entry.insert(tk.INSERT, "\n")
-        resize_input()
+        resize_composer(screen)
         return "break"
     screen._manual_entry.bind("<FocusIn>", clear_placeholder)
     screen._manual_entry.bind("<FocusOut>", restore_placeholder)
     screen._manual_entry.bind("<KeyPress>", lambda e: clear_placeholder() if e.char and not e.state & 4 else None)
-    screen._manual_entry.bind("<KeyRelease>", resize_input)
+    screen._manual_entry.bind("<KeyRelease>", lambda _: resize_composer(screen))
     screen._manual_entry.bind("<Return>", lambda _: (screen._send_manual(), "break")[1])
     screen._manual_entry.bind("<Control-Return>", lambda _: (screen._send_manual(), "break")[1])
     screen._manual_entry.bind("<Shift-Return>", newline)

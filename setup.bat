@@ -170,7 +170,7 @@ echo   Next steps:
 echo     1. Open Zoom (or Teams/Meet)
 echo     2. Go to Settings ^> Audio ^> Speaker
 echo     3. Change it to "CABLE Input"
-echo     4. Double-click "Zoom Co-Pilot" on your Desktop to launch
+echo     4. Double-click "Zoom Copilot v2.1 Preview" on your Desktop to launch
 echo  ============================================================
 echo.
 pause

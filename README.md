@@ -12,7 +12,29 @@
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-7885ee)
 [![GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue)](LICENSE)
 
-![Zoom Copilot meeting workspace](docs/media/workspace.png)
+![Zoom Copilot v2.1 preview with answer and transcript side by side](docs/media/v2.1-preview-workspace.png)
+
+## v2.1 preview
+
+This review build has a new native desktop layout with layered panels and a
+static isometric signal illustration. It uses the existing Windows launcher and
+Python dependencies. Its settings live in the preview folder, with separate
+support and update state under `ZoomCopilotPreview`.
+
+Wide workspaces put the answer and activity panes side by side. Smaller windows
+keep the answer or transcript accessible through the compact layout switch.
+
+- Stop hands device cleanup to a background thread and drains captured audio.
+  The next capture can start when the driver finishes closing.
+- Local Whisper uses a cancellable process that holds its model for one listening
+  session. Canceling a stalled decode reaps that process and lets Local Whisper
+  start again once cleanup finishes. In this app instance, model download and
+  deletion wait for the decoder to release the cache.
+
+Open **Zoom Copilot.exe** from the preview folder with Python and the app
+dependencies installed. The setup script creates a separate **Zoom Copilot v2.1
+Preview** shortcut. Run `python tools/preview_desktop.py` to see the real
+interface with synthetic meeting content.
 
 ## What's new in 2.0
 
@@ -39,7 +61,7 @@ All screenshots and demo footage use synthetic content in Demo mode. No meeting 
 
 </details>
 
-## Start on Windows
+## Start on Windows with the published release
 
 1. Download **Zoom-Copilot-v2.0.3.zip** from the [latest release](https://github.com/Sombra-1/zoom-copilot/releases/latest) and extract the entire folder.
 2. Run **setup.bat**. It checks Python 3.11+, creates a virtual environment, installs dependencies, and creates your desktop shortcut. Driver installation may request administrator access.

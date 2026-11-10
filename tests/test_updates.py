@@ -7,6 +7,7 @@ from unittest import mock
 
 import requests
 import zoom_copilot as app
+from copilot_core import overlay_view
 from copilot_core.updates import UpdateChecker, fetch_latest, version_tuple, API_URL, RELEASES_URL
 from copilot_core.version import APP_VERSION
 
@@ -95,15 +96,25 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual(self.checker.latest, "")
 
     def test_manual_check_ignores_cache_and_restores_dismissed_release(self):
-        self.checker.complete("2.1.0", False)
+        self.checker.complete("2.1.1", False)
         self.checker.dismiss()
         self.root._dispatcher.post.side_effect = lambda callback: callback()
         with mock.patch("copilot_core.updates.threading.Thread") as thread, \
-                mock.patch("copilot_core.updates.fetch_latest", return_value="2.1.0"):
+                mock.patch("copilot_core.updates.fetch_latest", return_value="2.1.1"):
             thread.side_effect = lambda **kw: mock.Mock(start=kw["target"])
             self.checker.check(manual=True)
         self.assertEqual(self.checker.dismissed, "")
         self.assertTrue(self.checker.available)
+        self.root.after.assert_not_called()
+
+    def test_automatic_check_schedules_startup_and_next_day(self):
+        checker = UpdateChecker(self.root, lambda: None, self.path, clock=lambda: 100000)
+        try:
+            self.root.after.assert_called_once_with(8000, checker.check)
+            checker.complete("2.1.1", False)
+            self.root.after.assert_called_with(24 * 60 * 60 * 1000, checker.check)
+        finally:
+            checker.close()
 
     def test_broken_cache_and_unwritable_state_are_nonfatal(self):
         self.path.write_text('{"checked": NaN, "latest": [1], "dismissed": true}')
@@ -124,17 +135,31 @@ class UpdateTests(unittest.TestCase):
                 mock.patch("copilot_core.vision_capture.CaptureController.probe", return_value=False):
             gui = app.App(support_state_file=Path(self.folder.name) / "support.json", check_updates=False)
             try:
-                gui._updates.complete("2.1.0", False)
+                gui._updates.complete("2.1.1", False)
                 gui.root.update()
                 self.assertIn(APP_VERSION, gui.current._update_label.cget("text"))
                 self.assertTrue(gui.current._update_strip.winfo_ismapped())
                 gui._launch(dict(app._default_settings(), backend="demo"))
+                gui.root.geometry("960x740")
+                gui.root.update()
+                screen = gui.current
+                entry = screen._manual_entry
+                draft = "Line one\nLine two\nLine three\nLine four\nLine five"
+                entry.delete("1.0", "end")
+                entry.insert("1.0", draft)
+                overlay_view.resize_composer(screen)
+                self.assertEqual(int(entry.cget("height")), 5)
+                overlay_view.toggle_vision(screen)
                 gui.root.geometry("680x560")
                 gui._community.usage.seconds = 10800
                 gui._community.sync()
                 gui.root.update()
-                self.assertTrue(gui.current._update_strip.winfo_ismapped())
-                self.assertTrue(gui.current._composer_send.winfo_ismapped())
+                self.assertTrue(screen._update_strip.winfo_ismapped())
+                self.assertTrue(screen._support_dismiss.winfo_ismapped())
+                self.assertTrue(screen._composer_send.winfo_ismapped())
+                self.assertTrue(screen.hud.text.winfo_ismapped())
+                self.assertEqual(int(entry.cget("height")), 2)
+                self.assertEqual(entry.get("1.0", "end-1c"), draft)
                 gui._updates.dismiss()
                 gui.root.update()
                 self.assertFalse(gui.current._update_strip.winfo_ismapped())

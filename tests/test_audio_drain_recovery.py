@@ -21,12 +21,16 @@ class SyntheticInput:
     def __init__(self, callback, **_options):
         self.callback = callback
         self.closed = False
+        self.stop_gate = None
+        self.stop_entered = threading.Event()
 
     def start(self):
         pass
 
     def stop(self):
-        pass
+        self.stop_entered.set()
+        if self.stop_gate is not None:
+            self.stop_gate.wait(5)
 
     def close(self):
         self.closed = True
@@ -107,7 +111,7 @@ class AudioDrainRecoveryTests(unittest.TestCase):
         self._pump_until(lambda: app.get_transcript_lines() == ["Earlier speech."])
         stream.emit(1.0, frames=4000)
         self.screen.toggle_listening()
-        self.assertTrue(stream.closed)
+        self._pump_until(lambda: stream.closed and not app._audio_device_closing.is_set())
         self.assertTrue(self.screen._audio_is_finishing())
         self._pump_until(self.decoder_entered.is_set)
         decoder = next(worker for worker in self._workers()
@@ -157,13 +161,8 @@ class AudioDrainRecoveryTests(unittest.TestCase):
         self.assertEqual([item["label"] for item in self.screen._chat_items
                           if item["kind"] == "them"], ["Transcript", "Audio gap"])
 
-        self.screen.toggle_listening()
-        self.assertIsNone(app.stream)
-        self.assertFalse(app._listen_event.is_set())
-
-        # A different provider can start even if the abandoned local call is blocked.
-        self.settings.update(transcription="groq", groq_key="synthetic-test-key")
-        with mock.patch.object(app, "transcribe_groq", return_value="Fresh speech."):
+        # A fresh session can start while a stale, mocked decode is blocked.
+        with mock.patch.object(app, "transcribe_local", return_value="Fresh speech."):
             self.screen.toggle_listening()
             new_stream = app.stream
             self.assertIsNotNone(new_stream)
@@ -185,3 +184,43 @@ class AudioDrainRecoveryTests(unittest.TestCase):
         self.assertIn("timed out", lines[-1].lower())
         self.assertTrue(decoder.is_alive())
         self.assertFalse(self.release.is_set())
+
+    def test_keyboard_action_cancels_finishing(self):
+        self._begin_blocked_drain()
+        self.screen.toggle_listening()
+        self.assertIn("canceled", self._assert_recovered_transcript()[-1].lower())
+
+    def test_device_query_failure_leaves_start_available(self):
+        with mock.patch("sounddevice.query_devices", side_effect=OSError("Device disconnected")):
+            self.screen.toggle_listening()
+            self._pump_until(lambda: "Audio device unavailable" in self.screen.status_lbl.cget("text"))
+        self.assertFalse(app._listen_event.is_set())
+        self.assertEqual(self.screen.toggle_btn.cget("text"), "Start listening")
+        self.assertTrue(any("Device disconnected" in row["text"] for row in self.screen._chat_items))
+
+        self.screen.toggle_listening()
+        self.assertTrue(app._listen_event.is_set())
+
+    def test_exact_audio_input_beats_partial_name(self):
+        devices = [{"name": "Monitor (Synthetic input)", "max_input_channels": 1},
+                   {"name": "Synthetic input", "max_input_channels": 1}]
+        with mock.patch("sounddevice.query_devices", return_value=devices):
+            self.assertEqual(app.find_device("synthetic input"), 1)
+            self.assertEqual(app.find_device("Monitor"), 0)
+
+    def test_stop_drains_audio_while_driver_stop_is_blocked(self):
+        self.screen.toggle_listening()
+        device = app.stream
+        self.assertIsNotNone(device)
+        device.stop_gate = threading.Event()
+        self.addCleanup(device.stop_gate.set)
+        device.emit(0.5, frames=4000)
+        self.screen.toggle_listening()
+        self._pump_until(device.stop_entered.is_set)
+        self._pump_until(lambda: not self.screen._audio_is_finishing())
+        self.assertFalse(device.closed)
+        self.assertEqual(app.get_transcript_lines(), ["Earlier speech."])
+        self.screen.toggle_listening()
+        self.assertIsNone(app.stream)
+        device.stop_gate.set()
+        self._pump_until(lambda: device.closed and not app._audio_device_closing.is_set())

@@ -4,7 +4,7 @@ import customtkinter as ctk
 
 from .ui_theme import COLORS as C, Button, Label, ScrollArea, card, row, entry, select, text_surface
 from .support_ui import sidebar_links
-from .branding import logo_label
+from .branding import logo_label, signal_label
 from .update_ui import sidebar as update_sidebar
 
 
@@ -54,35 +54,45 @@ def build(screen, runtime):
     screen.configure(bg=C["bg"])
     screen.grid_columnconfigure(1, weight=1)
     screen.grid_rowconfigure(0, weight=1)
-    sidebar = ctk.CTkFrame(screen, width=200, corner_radius=0, fg_color="#14161a")
-    sidebar.grid(row=0, column=0, sticky="ns")
+    sidebar = card(screen, width=206, corner_radius=16, fg_color=C["sidebar"])
+    sidebar.grid(row=0, column=0, sticky="ns", padx=(14, 0), pady=14)
     sidebar.grid_propagate(False)
     sidebar.grid_rowconfigure(5, weight=1)
     brand = row(sidebar)
-    brand.grid(row=0, column=0, padx=20, pady=(28, 3), sticky="w")
+    brand.grid(row=0, column=0, padx=19, pady=(20, 3), sticky="w")
     logo_label(brand, size=24).pack(side="left", padx=(0, 7))
     Label(brand, "Zoom Copilot", size=18, bold=True).pack(side="left")
-    Label(sidebar, "YOUR MEETING WORKSPACE", size=10, muted=True).grid(row=1, column=0, padx=22, pady=(0, 32), sticky="w")
+    Label(sidebar, "2.1 PREVIEW", size=11, bold=True, text_color=C["accent"]).grid(
+        row=1, column=0, padx=20, pady=(0, 23), sticky="w")
     screen._nav_buttons = {}
-    for index, (name, label) in enumerate((("connection", "AI connection"), ("audio", "Audio & transcript"), ("preferences", "Preferences")), 2):
+    for index, (name, label) in enumerate((("connection", "01  AI connection"), ("audio", "02  Audio & transcript"), ("preferences", "03  Preferences")), 2):
         button = Button(sidebar, label, width=168, height=40, quiet=True, anchor="w",
                         command=lambda target=name: show_page(screen, target))
         button.grid(row=index, column=0, padx=16, pady=4)
         screen._nav_buttons[name] = button
-    privacy = card(sidebar, fg_color="#1d2027", border_width=0)
-    privacy.grid(row=6, column=0, padx=16, pady=20, sticky="ew")
+    privacy = card(sidebar, fg_color=C["inset"])
+    privacy.grid(row=6, column=0, padx=16, pady=(10, 12), sticky="ew")
     Label(privacy, "You control the context", size=12, bold=True).pack(anchor="w", padx=12, pady=(12, 4))
     Label(privacy, "Choose what to capture.\nVision is always optional.", size=11, muted=True, justify="left").pack(anchor="w", padx=12, pady=(0, 12))
     sidebar_links(sidebar, screen.master)
     update_sidebar(screen, sidebar)
     content = row(screen)
-    content.grid(row=0, column=1, sticky="nsew", padx=(28, 24), pady=(24, 18))
+    content.grid(row=0, column=1, sticky="nsew", padx=(20, 20), pady=(14, 14))
     content.grid_columnconfigure(0, weight=1)
     content.grid_rowconfigure(2, weight=1)
-    screen._page_title = Label(content, "AI connection", size=26, bold=True)
-    screen._page_title.grid(row=0, column=0, sticky="w", pady=(0, 3))
-    screen._page_description = Label(content, "Choose your AI. Make it your workspace.", muted=True, size=13)
-    screen._page_description.grid(row=1, column=0, sticky="w", pady=(0, 18))
+    hero = card(content, fg_color=C["elevated"], border_color="#3b4d74", corner_radius=16)
+    hero.grid(row=0, column=0, sticky="ew", pady=(0, 14))
+    illustration = signal_label(hero)
+    if illustration is not None:
+        illustration.pack(side="right", padx=(0, 10), pady=2)
+    headline = row(hero)
+    headline.pack(side="left", fill="x", expand=True, padx=(20, 6), pady=15)
+    screen._page_title = Label(headline, "AI connection", size=28, bold=True)
+    screen._page_title.pack(anchor="w", pady=(0, 2))
+    screen._page_description = Label(headline, "Choose an AI provider for your meetings.", muted=True, size=12,
+                                     wraplength=300, justify="left")
+    screen._page_description.pack(anchor="w")
+    headline.bind("<Configure>", lambda e: screen._page_description.configure(wraplength=max(150, e.width - 10)))
     screen._page_container = row(content)
     screen._page_container.grid(row=2, column=0, sticky="nsew")
     screen._pages = {}
@@ -120,9 +130,9 @@ def show_page(screen, name):
                                         fg=C["fg"] if key == name else C["fg2"])
     screen._pages[name].pack(fill="both", expand=True)
     title, description = {
-        "connection": ("AI connection", "Choose your AI. Make it your workspace."),
-        "audio": ("Audio & transcript", "Hear the conversation clearly, locally or in the cloud."),
-        "preferences": ("Make it yours", "Tune the overlay, screen context, and meeting assistance."),
+        "connection": ("AI connection", "Choose a provider for meeting questions and notes."),
+        "audio": ("Audio & transcript", "Select the audio input and where speech is decoded."),
+        "preferences": ("Preferences", "Adjust the overlay, answers, and screen context."),
     }[name]
     screen._page_title.config(text=title)
     screen._page_description.config(text=description)
@@ -144,9 +154,10 @@ def build_connection(screen, parent, runtime):
     screen._provider_cards = {}
     for index, name in enumerate(("codex", "builtin", "ollama", "groq", "claude", "demo")):
         title, subtitle = labels[name]
-        button = Button(choices, title + "\n" + subtitle, width=120, height=66, anchor="w",
+        button = Button(choices, title + "\n" + subtitle, width=120, height=60, anchor="w",
                         border_width=1, border_color=C["border"], font=("Segoe UI", 12),
                         command=lambda value=name: choose_backend(screen, value))
+        button._text_label.configure(justify="left")
         button.grid(row=index // 3, column=index % 3, sticky="ew", padx=(0, 7), pady=(0, 7))
         screen._provider_cards[name] = button
     screen._backend_container = row(parent)
@@ -187,8 +198,8 @@ def choose_backend(screen, name):
 def refresh_provider(screen):
     selected = screen._vars["backend"].get()
     for name, button in screen._provider_cards.items():
-        button.configure(fg_color="#252b42" if name == selected else C["panel2"],
-                         border_color=C["accent2"] if name == selected else C["border"],
+        button.configure(fg_color="#29375c" if name == selected else C["inset"],
+                         border_color="#8698ff" if name == selected else C["border"],
                          text_color=C["fg"] if name == selected else C["fg2"])
 
 

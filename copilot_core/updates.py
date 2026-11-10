@@ -52,6 +52,7 @@ class UpdateChecker:
         folder = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "state")
         self.path = Path(state_file) if state_file else folder / "ZoomCopilot" / "updates.json"
         self.root, self.view, self.clock = root, view, clock
+        self.enabled = enabled
         self.closed, self.busy = False, False
         self.latest, self.dismissed, self.checked = "", "", 0.0
         self.message = "Check for updates"
@@ -130,7 +131,7 @@ class UpdateChecker:
         self.schedule()
 
     def schedule(self):
-        if self.closed:
+        if self.closed or not self.enabled:
             return
         if self.timer is not None:
             self.root.after_cancel(self.timer)
