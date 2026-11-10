@@ -222,5 +222,6 @@ class AudioDrainRecoveryTests(unittest.TestCase):
         self.assertEqual(app.get_transcript_lines(), ["Earlier speech."])
         self.screen.toggle_listening()
         self.assertIsNone(app.stream)
+        self.assertTrue(any("reconnect an external audio device" in row["text"] for row in self.screen._chat_items))
         device.stop_gate.set()
         self._pump_until(lambda: device.closed and not app._audio_device_closing.is_set())

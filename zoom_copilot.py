@@ -44,7 +44,8 @@ from copilot_core.answer_schema import Answer, parse_answer
 from copilot_core.ui_dispatch import UiDispatcher
 from copilot_core.diagnostics import record_failure
 from copilot_core.processes import quiet_process_options
-from copilot_core.whisper_session import WhisperSession, WhisperBusy, cache_busy, model_maintenance
+from copilot_core.whisper_session import (WhisperSession, WhisperBusy, cache_busy, model_maintenance,
+                                          whisper_cache_directory as _get_whisper_cache_dir)
 from copilot_core.community import CommunitySupport
 from copilot_core.updates import UpdateChecker
 from copilot_core.branding import set_process_identity, apply_window_icon, tray_icon
@@ -88,6 +89,7 @@ _audio_device_closing = threading.Event()
 _listen_generation   = 0
 _listen_generation_lock = threading.Lock()
 AUDIO_DRAIN_TIMEOUT_MS = 60_000
+AUDIO_SILENCE_RMS = 0.008
 
 # ── Session stats (thread-safe via atomic int ops on GIL + _stats_lock) ──────
 _stats_lock = threading.Lock()
@@ -1203,15 +1205,6 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
 
 # ── Whisper model cache management ───────────────────────────────────────────
 
-def _get_whisper_cache_dir():
-    """Return the HuggingFace hub cache directory (respects env overrides)."""
-    hub_cache = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
-    if hub_cache:
-        return os.path.expanduser(hub_cache)
-    cache_home = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
-    hf_home = os.environ.get("HF_HOME") or os.path.join(cache_home, "huggingface")
-    return os.path.join(os.path.expanduser(hf_home), "hub")
-
 def is_whisper_model_downloaded(model_name):
     """Return True if the faster-whisper model files are cached locally."""
     folder = os.path.join(_get_whisper_cache_dir(),
@@ -1243,7 +1236,7 @@ def download_whisper_model(model_name, progress_cb):
     from faster_whisper import WhisperModel
     with model_maintenance():
         progress_cb(f"Downloading {model_name}…")
-        WhisperModel(model_name, device="cpu", compute_type="int8")
+        WhisperModel(model_name, device="cpu", compute_type="int8", download_root=_get_whisper_cache_dir())
 
 
 def transcribe_local(audio_np, model_name="base", language="en", session=None):
@@ -1308,12 +1301,14 @@ def _record_audio_gap(gui, active, reason, samples=0, capture=None):
     gui._post(show_gap)
 
 
-def _show_audio_backlog(gui, generation, work_queue, seconds):
+def _show_audio_backlog(gui, generation, work_queue):
     with _listen_generation_lock:
         if generation != _listen_generation or not _listen_event.is_set():
             return
+        with work_queue.mutex:
+            samples = sum(len(job.audio) for job in work_queue.queue if job.audio is not None)
         with _stats_lock:
-            session_stats["queued_audio"] = round(work_queue.qsize() * seconds)
+            session_stats["queued_audio"] = round(samples / 16000)
     gui.update_stats()
 
 
@@ -1327,9 +1322,12 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
     """Collect audio into chunks and enqueue them for one ordered processor."""
     import numpy as np
     buffer, buffered_samples = [], 0
+    quiet_samples, heard_speech = 0, False
     gaps = {}
     expected_position = 0
     chunk_samples = int(16000 * s["chunk_seconds"])
+    min_pause_chunk = 2 * 16000
+    pause_samples = int(0.4 * 16000)
 
     def active():
         return _listen_session_active(generation)
@@ -1338,7 +1336,7 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
         gaps[reason] = gaps.get(reason, 0) + samples
 
     def submit():
-        nonlocal buffer, buffered_samples
+        nonlocal buffer, buffered_samples, quiet_samples, heard_speech
         if not buffer and not gaps:
             return
         audio = None
@@ -1349,6 +1347,7 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             else:
                 add_gap("An interrupted audio fragment was too short to transcribe", samples)
         buffer, buffered_samples = [], 0
+        quiet_samples, heard_speech = 0, False
         job = TranscriptionJob(audio, tuple(gaps.items()))
         while active():
             try:
@@ -1366,7 +1365,7 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             else:
                 gaps.clear()
                 break
-        _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
+        _show_audio_backlog(gui, generation, work_queue)
 
     try:
         while active():
@@ -1389,7 +1388,14 @@ def transcribe_loop(s, gui, generation, capture, work_queue):
             expected_position = position + len(chunk)
             buffer.append(chunk)
             buffered_samples += len(chunk)
-            if buffered_samples >= chunk_samples:
+            if np.mean(np.square(chunk)) >= AUDIO_SILENCE_RMS ** 2:
+                heard_speech = True
+                quiet_samples = 0
+            else:
+                quiet_samples += len(chunk)
+            # Finish earlier at a natural pause, with the configured cap for continuous speech.
+            paused = heard_speech and buffered_samples >= min_pause_chunk and quiet_samples >= pause_samples
+            if paused or buffered_samples >= chunk_samples:
                 submit()
         if active() and capture.closed.is_set():
             submit()
@@ -1428,7 +1434,7 @@ def audio_process_loop(s, gui, generation, work_queue, answer_queue=None, captur
             for reason, samples in job.gaps:
                 _record_audio_gap(gui, active, reason, samples, capture)
             if capture is not None:
-                _show_audio_backlog(gui, generation, work_queue, s["chunk_seconds"])
+                _show_audio_backlog(gui, generation, work_queue)
             if job.audio is not None and active():
                 if process_audio(job.audio, s, gui, generation, answer_queue, capture) is False:
                     return
@@ -1496,7 +1502,7 @@ def _should_respond(text, history, custom_keywords="", interview_mode=False):
     return False
 
 
-def _is_silence(audio_np, rms_threshold=0.008, min_duration_ms=200, samplerate=16000):
+def _is_silence(audio_np, rms_threshold=AUDIO_SILENCE_RMS, min_duration_ms=200, samplerate=16000):
     """Return True if the audio is effectively silent.
     Uses RMS (root mean square) which is more accurate than simple mean.
     Also skips chunks that are too short to be meaningful speech."""
@@ -1559,6 +1565,7 @@ def process_audio(audio_np, s, gui, generation=None, answer_queue=None, capture=
     except Cancelled:
         return
     except WhisperBusy:
+        _record_audio_gap(gui, active, "Local Whisper's model cache was busy", len(audio_np), capture)
         def busy():
             if active():
                 gui.append_message("ERROR", str(WhisperBusy()), "error")
@@ -2906,6 +2913,13 @@ class OverlayScreen(OverlayServices, tk.Frame):
             return
         if _audio_device_closing.is_set():
             self.set_status("Audio device is still closing", C["warn"])
+            self.append_message(
+                "ERROR",
+                "Wait briefly and try Start listening again. If it stays stuck, quit Zoom Copilot fully "
+                "(use Quit from the tray if shown), "
+                "reconnect an external audio device or restart the virtual audio driver, then reopen Zoom Copilot.",
+                "error",
+            )
             return
         try:
             import sounddevice as sd

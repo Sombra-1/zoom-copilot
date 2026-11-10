@@ -246,7 +246,7 @@ def build_audio(screen, parent, runtime):
     screen._mic_status = Label(device, "Play something in your meeting app, then test.", muted=True, size=12, wraplength=500)
     screen._mic_status.pack(fill="x", pady=5)
     field(screen, device, "Language", "language", "Language code, for example en, ar, fr, or de.")
-    field(screen, device, "Audio chunk length", "chunk_seconds", "Seconds per transcription chunk · 2–30.")
+    field(screen, device, "Maximum audio chunk length", "chunk_seconds", "2–30 seconds. A pause after speech can send audio sooner.")
 
 
 def build_whisper_table(screen, parent, runtime):

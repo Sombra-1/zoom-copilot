@@ -1,7 +1,9 @@
 """Keep native Local Whisper work in an owned, cancellable process."""
 import base64
 from contextlib import contextmanager
+import errno
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -18,11 +20,43 @@ _cache_lock = threading.Lock()
 
 class WhisperBusy(RuntimeError):
     def __init__(self):
-        super().__init__("Local Whisper is finishing cleanup or managing a model. Try again shortly.")
+        super().__init__("Local Whisper's model cache is in use. Wait for cleanup or model work to finish, "
+                         "or stop Local Whisper in another window, then retry.")
 
 
 def cache_busy():
     return _cache_lock.locked()
+
+
+def whisper_cache_directory():
+    hub = os.environ.get("HF_HUB_CACHE") or os.environ.get("HUGGINGFACE_HUB_CACHE")
+    if hub:
+        return os.path.expanduser(hub)
+    cache_home = os.environ.get("XDG_CACHE_HOME") or "~/.cache"
+    hf_home = os.environ.get("HF_HOME") or os.path.join(cache_home, "huggingface")
+    return os.path.join(os.path.expanduser(hf_home), "hub")
+
+
+@contextmanager
+def cache_lease():
+    """Hold an OS lock until this operation or process closes its file handle."""
+    cache = Path(whisper_cache_directory()).resolve()
+    cache.mkdir(parents=True, exist_ok=True)
+    # Keep the lock file in place so concurrent users always lock the same file.
+    with (cache / ".zoom-copilot.lock").open("a+b") as lease:
+        lease.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lease.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lease.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                raise WhisperBusy() from None
+            raise
+        yield
 
 
 @contextmanager
@@ -30,7 +64,8 @@ def model_maintenance():
     if not _cache_lock.acquire(blocking=False):
         raise WhisperBusy()
     try:
-        yield
+        with cache_lease():
+            yield
     finally:
         _cache_lock.release()
 
@@ -57,9 +92,10 @@ class WhisperSession:
         if not _cache_lock.acquire(blocking=False):
             raise WhisperBusy()
         try:
+            env = dict(os.environ, HF_HUB_CACHE=str(Path(whisper_cache_directory()).resolve()))
             owner = OwnedProcess([sys.executable, "-m", "copilot_core.whisper_worker"],
                                  cwd=str(Path(__file__).resolve().parents[1]), stdin=subprocess.PIPE,
-                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
         except Exception:
             _cache_lock.release()
             raise
@@ -103,6 +139,8 @@ class WhisperSession:
             raise RuntimeError("Local Whisper worker stopped unexpectedly") from exc
         if self._closed.is_set():
             raise Cancelled("Local transcription canceled")
+        if result.get("busy") is True:
+            raise WhisperBusy()
         if "error" in result:
             raise RuntimeError(result["error"])
         return result["text"]

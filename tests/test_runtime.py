@@ -234,6 +234,28 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(gap.gaps, (("Audio input buffer overflowed", 4000),
                                     ("The audio device reported an input overflow", 0)))
 
+    def test_speech_pause_enqueues_audio_before_the_configured_maximum(self):
+        generation = copilot._begin_listen_session()
+        capture, work = copilot.AudioInput(), queue.Queue()
+        settings = dict(copilot._default_settings(), chunk_seconds=8)
+        collector = threading.Thread(target=copilot.transcribe_loop,
+                                     args=(settings, mock.Mock(), generation, capture, work), daemon=True)
+        collector.start()
+        try:
+            speech = np.full((1600, 1), 0.25, dtype=np.float32)
+            silence = np.zeros_like(speech)
+            for _ in range(18):
+                capture.callback(speech, len(speech), None, None)
+            for _ in range(4):
+                capture.callback(silence, len(silence), None, None)
+            segment = work.get(timeout=3)
+            self.assertFalse(capture.closed.is_set())
+            np.testing.assert_array_equal(segment.audio, np.r_[np.tile(speech[:, 0], 18), np.zeros(6400)])
+            self.assertFalse(segment.gaps)
+        finally:
+            copilot._end_listen_session()
+            collector.join(2)
+
     def test_queued_vision_prompt_is_cancelled_after_scope_change(self):
         gui = mock.Mock()
         gui._vision_epoch = 2

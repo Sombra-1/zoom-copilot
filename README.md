@@ -25,11 +25,15 @@ Wide workspaces put the answer and activity panes side by side. Smaller windows
 keep the answer or transcript accessible through the compact layout switch.
 
 - Stop hands device cleanup to a background thread and drains captured audio.
-  The next capture can start when the driver finishes closing.
+  The next capture can start when the driver finishes closing. If the driver
+  remains stuck, quit the app fully, reconnect or restart the audio device,
+  then reopen the app.
 - Local Whisper uses a cancellable process that holds its model for one listening
   session. Canceling a stalled decode reaps that process and lets Local Whisper
-  start again once cleanup finishes. In this app instance, model download and
-  deletion wait for the decoder to release the cache.
+  start again once cleanup finishes. Updated instances coordinate model use,
+  downloads, and deletion through a lock in the configured Hugging Face cache.
+- Speech followed by a short pause can reach transcription before the maximum
+  chunk length. Continuous speech still uses the configured maximum.
 
 Open **Zoom Copilot.exe** from the preview folder with Python and the app
 dependencies installed. The setup script creates a separate **Zoom Copilot v2.1
