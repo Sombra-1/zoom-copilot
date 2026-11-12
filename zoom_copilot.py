@@ -34,6 +34,7 @@ import queue
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -1164,21 +1165,19 @@ def transcribe_groq(audio_np, key, language="en", model="whisper-large-v3-turbo"
     import urllib.request, urllib.error, json as _json
     wav = _numpy_to_wav_bytes(audio_np)
     boundary = "GCPBoundary7MA4YWxkTrZu0gW"
-    timing = ""
+    fields = {"model": model}
+    language = (language or "").strip().lower()
+    if re.fullmatch(r"[a-z]{2}", language):
+        fields["language"] = language
     if overlap_samples:
-        timing = (f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"response_format\"\r\n\r\nverbose_json"
-                  f"\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"timestamp_granularities[]\"\r\n\r\nword")
+        fields.update({"response_format": "verbose_json", "timestamp_granularities[]": "word"})
+    metadata = "".join(f'\r\n--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}'
+                       for name, value in fields.items())
     body = (
         f"--{boundary}\r\n"
         f'Content-Disposition: form-data; name="file"; filename="audio.wav"\r\n'
         f"Content-Type: audio/wav\r\n\r\n"
-    ).encode() + wav + (
-        f"\r\n--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="model"\r\n\r\n{model}\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\n{language}'
-        f"{timing}\r\n--{boundary}--\r\n"
-    ).encode()
+    ).encode() + wav + f"{metadata}\r\n--{boundary}--\r\n".encode()
 
     last_err = None
     for attempt in range(2):
@@ -2478,6 +2477,7 @@ class OverlayScreen(OverlayServices, tk.Frame):
         self._request_epoch = 0
         self._audio_input = None
         self._audio_drain_timer = None
+        self._open_settings_after_audio = False
         self._selected_window = None
         self._screen_inflight = threading.Lock()
         self.dispatcher = master._dispatcher
@@ -2487,6 +2487,33 @@ class OverlayScreen(OverlayServices, tk.Frame):
 
     def _build(self):
         overlay_view.build(self)
+
+    def _workspace_content(self):
+        return {
+            "chat": list(self._chat_items),
+            "filter": self._chat_filter,
+            "notes": self._latest_notes,
+            "answers": list(self.hud.answers),
+            "answer_index": self.hud.index,
+            "answer_pinned": self.hud.pinned,
+            "draft": "" if self._input_has_placeholder else self._manual_entry.get("1.0", "end-1c"),
+        }
+
+    def _restore_workspace_content(self, content):
+        self._chat_items = content["chat"]
+        self._latest_notes = content["notes"]
+        self._set_chat_filter(content["filter"])
+        self.hud.answers = content["answers"]
+        self.hud.index = content["answer_index"]
+        if content["answer_pinned"]:
+            self.hud.pin()
+        self.hud.render()
+        if content["draft"]:
+            self._manual_entry.delete("1.0", "end")
+            self._manual_entry.insert("1.0", content["draft"])
+            self._manual_entry.config(fg=C["fg"])
+            self._input_has_placeholder = False
+            overlay_view.resize_composer(self)
 
     def _build_filter_tabs(self, parent):
         filters = [
@@ -3160,6 +3187,9 @@ class OverlayScreen(OverlayServices, tk.Frame):
                         C["warn"] if gap_reason else C["fg2"])
         self.append_message("SYSTEM", "Stopped.", "ai")
         self.update_stats()
+        if self._open_settings_after_audio:
+            self._open_settings_after_audio = False
+            self._later(0, self.on_settings)
 
 
 # ================================================================================
@@ -3181,10 +3211,8 @@ class App:
         self.root.attributes("-topmost", True)
         self.root.resizable(True, True)
         self.current = None
-        if support_state_file is None:
-            state_root = Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".local" / "state")
-            support_state_file = state_root / "ZoomCopilotPreview" / "community-support.json"
-        if update_state_file is None:
+        self._saved_workspace_content = None
+        if update_state_file is None and support_state_file is not None:
             update_state_file = Path(support_state_file).with_name("updates.json")
         self._updates = UpdateChecker(self.root, lambda: self.current, update_state_file, enabled=check_updates)
         self.root._updates = self._updates
@@ -3231,6 +3259,12 @@ class App:
         _detach_audio_stream()
 
     def _show_setup(self):
+        if isinstance(self.current, OverlayScreen):
+            if self.current._audio_input is not None:
+                self.current._open_settings_after_audio = True
+                self.current._stop()
+                return
+            self._saved_workspace_content = self.current._workspace_content()
         self._community.pause()
         self._discard_workspace_audio()
         _end_screen_session()
@@ -3245,14 +3279,18 @@ class App:
         self._discard_workspace_audio()
         if self.current:
             self.current.destroy()
-        with _history_lock:
-            conversation_history.clear()
+        content, self._saved_workspace_content = self._saved_workspace_content, None
+        if content is None:
+            with _history_lock:
+                conversation_history.clear()
         fit_window(self.root, 960, 740, minimum=(680, 560))
         self.current = OverlayScreen(
             self.root, dict(settings, vision_mode="off"),
             on_settings=self._show_setup,
             on_toggle_capture=self._toggle_capture,
         )
+        if content is not None:
+            self.current._restore_workspace_content(content)
         # Re-apply capture hiding after overlay is built
         self.root.after(100, lambda: self._set_capture_hidden(self._capture_hidden[0]))
         self._community.sync()
@@ -3353,7 +3391,7 @@ class App:
             pystray.MenuItem("Restore", _on_restore, default=True),
             pystray.MenuItem("Quit", _on_quit),
         )
-        self._tray_icon = pystray.Icon("open-meeting-copilot", _make_icon(), "Open Meeting Copilot", menu)
+        self._tray_icon = pystray.Icon("zoom-copilot", _make_icon(), "Zoom Copilot", menu)
         icon = self._tray_icon
         def run_icon():
             try:

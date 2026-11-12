@@ -12,28 +12,25 @@
 ![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-7885ee)
 [![GPL v3](https://img.shields.io/badge/License-GPL%20v3-blue)](LICENSE)
 
-![Zoom Copilot v2.1 preview with answer and transcript side by side](docs/media/v2.1-preview-workspace.png)
+![Zoom Copilot v2.1 with answer and transcript side by side](docs/media/v2.1-preview-workspace.png)
 
-## v2.1 preview
+## What's new in 2.1
 
-This review build has a new native desktop layout with layered panels and a
-static isometric signal illustration. It uses the existing Windows launcher and
-Python dependencies. Its settings live in the preview folder, with separate
-support and update state under `ZoomCopilotPreview`.
-
-Wide workspaces put the answer and activity panes side by side. Smaller windows
-keep the answer or transcript accessible through the compact layout switch.
+The redesigned workspace puts answers and activity side by side when there is
+room. Smaller windows let you switch between them.
 
 - Stop hands device cleanup to a background thread and drains captured audio.
   The next capture can start when the driver finishes closing. If the driver
   remains stuck, quit the app fully, reconnect or restart the audio device,
   then reopen the app.
+- Opening Settings during listening finishes queued audio first. Your transcript,
+  answers, notes, and draft carry over when you return to the workspace.
 - Local Whisper uses a cancellable process that holds its model for one listening
   session. Canceling a stalled decode reaps that process and lets Local Whisper
-  start again once cleanup finishes. The preview stores its models in the
+  start again once cleanup finishes. Version 2.1 stores its models in the
   `zoom-copilot-v2.1` folder inside the configured Hugging Face cache so older
-  apps can keep using their own files. The preview downloads its model on first
-  use or through **Audio & transcript**. Preview instances coordinate model
+  apps can keep using their own files. Download a model through **Audio & transcript**
+  or when you first use Local Whisper. Version 2.1 instances coordinate model
   use, downloads, and deletion through a lock in that folder.
 - Speech followed by a short pause can reach transcription before the maximum
   chunk length. Enable **Silero speech detection** in **Audio & transcript** to
@@ -42,11 +39,6 @@ keep the answer or transcript accessible through the compact layout switch.
   carries up to 320 ms into the next chunk and uses word timestamps to trim
   text from the repeated audio. If Silero is unavailable, audio level detection
   stays active for that session.
-
-Open **Zoom Copilot.exe** from the preview folder with Python and the app
-dependencies installed. The setup script creates a separate **Zoom Copilot v2.1
-Preview** shortcut. Run `python tools/preview_desktop.py` to see the real
-interface with synthetic meeting content.
 
 ## What's new in 2.0
 
@@ -75,16 +67,16 @@ All screenshots and demo footage use synthetic content in Demo mode. No meeting 
 
 ## Start on Windows with the published release
 
-1. Download **Zoom-Copilot-v2.0.3.zip** from the [latest release](https://github.com/Sombra-1/zoom-copilot/releases/latest) and extract the entire folder.
+1. Download **Zoom-Copilot-v2.1.0-Windows.zip** from the [latest release](https://github.com/Sombra-1/zoom-copilot/releases/latest) and extract the entire folder.
 2. Run **setup.bat**. It checks Python 3.11+, creates a virtual environment, installs dependencies, and creates your desktop shortcut. Driver installation may request administrator access.
 3. Open **Zoom Co-Pilot** from your Desktop, or **Zoom Copilot.exe** in the extracted folder.
 4. Choose an AI provider. **Demo** lets you explore the interface immediately without an account. Configure audio when you want transcription, then select **Open workspace**.
 
-The EXE is a small windowless launcher, not a bundled Python runtime. Keep it with the app files and run setup first. Editable icon and launcher sources are included; see [APP_ICON.md](APP_ICON.md).
+The Windows launcher uses the Python environment created by **setup.bat**. Keep the EXE with the app files. Editable icon and launcher sources are included. [App icon and launcher](APP_ICON.md)
 
 For meeting audio, select **CABLE Input** as Zoom/Teams/Meet's speaker and the matching **CABLE Output** capture device in Copilot. Use VB-Cable's monitoring settings if you also need to hear that output. Typed questions work without audio setup.
 
-For an existing installation, close the app and update the source files, then rerun **setup.bat** to refresh dependencies. Keep your local `.copilot_settings.json` if you want to retain configuration. Do not upload it to GitHub.
+For an existing installation, close the app and update the source files, then rerun **setup.bat** to refresh dependencies. Keep your local `.copilot_settings.json` if you want to retain configuration. This file contains credentials. [v2.0.3 release archive](https://github.com/Sombra-1/zoom-copilot/releases/tag/v2.0.3)
 
 ## Your workspace
 

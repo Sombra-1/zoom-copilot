@@ -145,12 +145,16 @@ if errorlevel 1 (
         echo               Install it manually from: vb-audio.com/Cable
     ) else (
         echo        Signature verified. Requesting admin rights for the driver only...
-        powershell -NoProfile -Command "$p=Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode" >> "%LOG%" 2>&1
+        powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -ArgumentList '/S' -Verb RunAs -Wait -PassThru; exit $p.ExitCode" >> "%LOG%" 2>&1
         if errorlevel 1 (
             echo        [WARN] Silent driver install failed. Opening the verified installer...
-            powershell -NoProfile -Command "Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -Verb RunAs -Wait" >> "%LOG%" 2>&1
+            powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $p=Start-Process -FilePath '%CABLE_DIR%\VBCABLE_Setup_x64.exe' -Verb RunAs -Wait -PassThru; exit $p.ExitCode" >> "%LOG%" 2>&1
         )
-        echo        VB-Cable installed.
+        if errorlevel 1 (
+            echo        [WARN] VB-Cable setup did not complete. See setup_log.txt for details.
+        ) else (
+            echo        VB-Cable installed.
+        )
     )
 )
 echo.
@@ -159,7 +163,11 @@ echo.
 echo  Creating desktop shortcut...
 set "TARGET=%VENV%\Scripts\pythonw.exe"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%create-shortcut.ps1" -PythonPath "%TARGET%" >> "%LOG%" 2>&1
-echo        Shortcut created on Desktop.
+if errorlevel 1 (
+    echo        [WARN] Shortcut creation failed. Open Zoom Copilot.exe in this folder.
+) else (
+    echo        Shortcut created on Desktop.
+)
 echo.
 
 :: ── Done ──────────────────────────────────────────────────────────────────
@@ -170,7 +178,7 @@ echo   Next steps:
 echo     1. Open Zoom (or Teams/Meet)
 echo     2. Go to Settings ^> Audio ^> Speaker
 echo     3. Change it to "CABLE Input"
-echo     4. Double-click "Zoom Copilot v2.1 Preview" on your Desktop to launch
+echo     4. Double-click "Zoom Co-Pilot" on your Desktop or open Zoom Copilot.exe
 echo  ============================================================
 echo.
 pause

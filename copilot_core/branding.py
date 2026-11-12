@@ -6,7 +6,7 @@ import sys
 import tkinter as tk
 
 ASSETS = Path(__file__).resolve().parents[1] / "assets"
-APP_ID = "Sombra1.ZoomCopilot.Preview"
+APP_ID = "Sombra1.ZoomCopilot.Community"
 
 
 def set_process_identity():

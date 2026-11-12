@@ -122,6 +122,52 @@ class RuntimeReleaseTests(unittest.TestCase):
             finally:
                 gui._quit()
 
+    def test_settings_drains_audio_and_preserves_workspace_content(self):
+        import numpy as np
+
+        settings = dict(app._default_settings(), backend="demo", transcription="local")
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(app, "load_settings", return_value=settings), \
+                mock.patch.object(app, "save_settings"), \
+                mock.patch.object(app, "find_device", return_value=0), \
+                mock.patch.object(app, "faster_whisper_installed", return_value=True), \
+                mock.patch.object(app, "transcribe_local", return_value="Final audio survived."), \
+                mock.patch("sounddevice.InputStream") as input_stream, \
+                mock.patch("copilot_core.vision_capture.CaptureController.probe", return_value=False):
+            gui = app.App(support_state_file=Path(folder) / "usage.json")
+            try:
+                gui._launch(settings)
+                workspace = gui.current
+                workspace.append_message("Copilot", "Earlier answer.", "ai")
+                workspace.hud.pin()
+                workspace._latest_notes = "Earlier meeting notes."
+                workspace._manual_entry.delete("1.0", "end")
+                workspace._manual_entry.insert("1.0", "Keep this draft")
+                workspace._input_has_placeholder = False
+                workspace.toggle_listening()
+                callback = input_stream.call_args.kwargs["callback"]
+                callback(np.full((4000, 1), 0.2, dtype=np.float32), 4000, None, None)
+                workspace.on_settings()
+                self.assertIs(gui.current, workspace)
+                self.assertTrue(workspace._audio_is_finishing())
+
+                deadline = time.monotonic() + 5
+                while gui.current is workspace and time.monotonic() < deadline:
+                    gui.root.update()
+                    time.sleep(0.01)
+                self.assertIsInstance(gui.current, app.SetupScreen)
+                gui.current._launch()
+                restored = gui.current
+                self.assertIsInstance(restored, app.OverlayScreen)
+                self.assertEqual(app.get_transcript_lines(), ["Final audio survived."])
+                self.assertIn("Final audio survived.", restored.chat.get("1.0", "end"))
+                self.assertEqual(restored._latest_notes, "Earlier meeting notes.")
+                self.assertTrue(restored.hud.pinned)
+                self.assertIn("Earlier answer.", restored.hud.answers[0].markdown())
+                self.assertEqual(restored._manual_entry.get("1.0", "end-1c"), "Keep this draft")
+            finally:
+                gui._quit()
+
     @unittest.skipUnless(sys.platform == "win32", "Windows system tray")
     def test_failed_tray_icon_restores_the_window(self):
         with mock.patch.object(app, "load_settings", side_effect=lambda: dict(app._default_settings(), backend="demo")):

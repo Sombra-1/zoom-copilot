@@ -296,6 +296,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn(b'\r\n\r\nverbose_json\r\n', request.call_args.args[0].data)
         self.assertIn(b'name="timestamp_granularities[]"\r\n\r\nword\r\n', request.call_args.args[0].data)
 
+    def test_groq_auto_language_omits_the_language_field(self):
+        audio = np.zeros(4000, dtype=np.float32)
+        with mock.patch("urllib.request.urlopen") as request:
+            request.return_value.__enter__.return_value.read.return_value = b'{"text":"Detected speech"}'
+            self.assertEqual(copilot.transcribe_groq(audio, "test-key", language="auto"), "Detected speech")
+            self.assertNotIn(b'name="language"', request.call_args.args[0].data)
+            copilot.transcribe_groq(audio, "test-key", language=" EN ")
+            self.assertIn(b'name="language"\r\n\r\nen\r\n', request.call_args.args[0].data)
+
     def test_queued_vision_prompt_is_cancelled_after_scope_change(self):
         gui = mock.Mock()
         gui._vision_epoch = 2

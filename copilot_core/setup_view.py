@@ -59,11 +59,9 @@ def build(screen, runtime):
     sidebar.grid_propagate(False)
     sidebar.grid_rowconfigure(5, weight=1)
     brand = row(sidebar)
-    brand.grid(row=0, column=0, padx=19, pady=(20, 3), sticky="w")
+    brand.grid(row=0, column=0, padx=19, pady=(20, 23), sticky="w")
     logo_label(brand, size=24).pack(side="left", padx=(0, 7))
     Label(brand, "Zoom Copilot", size=18, bold=True).pack(side="left")
-    Label(sidebar, "2.1 PREVIEW", size=11, bold=True, text_color=C["accent"]).grid(
-        row=1, column=0, padx=20, pady=(0, 23), sticky="w")
     screen._nav_buttons = {}
     for index, (name, label) in enumerate((("connection", "01  AI connection"), ("audio", "02  Audio & transcript"), ("preferences", "03  Preferences")), 2):
         button = Button(sidebar, label, width=168, height=40, quiet=True, anchor="w",
@@ -245,7 +243,7 @@ def build_audio(screen, parent, runtime):
     screen._vol_bar = screen._vol_canvas.create_rectangle(0, 0, 0, 14, fill=C["success"], outline="")
     screen._mic_status = Label(device, "Play something in your meeting app, then test.", muted=True, size=12, wraplength=500)
     screen._mic_status.pack(fill="x", pady=5)
-    field(screen, device, "Language", "language", "Language code, for example en, ar, fr, or de.")
+    field(screen, device, "Language", "language", "Use auto for detection or enter a language code such as en, ar, fr, or de.")
     field(screen, device, "Maximum audio chunk length", "chunk_seconds", "2–30 seconds. A pause after speech can send audio sooner.")
     screen._vars["silero_vad"] = enabled = tk.BooleanVar(value=screen.s.get("silero_vad", False))
     sensitivity = row(device)

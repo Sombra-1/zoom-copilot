@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.0 — 2026-11-12
+
+- Redesigned the setup screens and added a side-by-side answer and transcript layout.
+- Moved audio device shutdown off the interface thread and made the Local Whisper worker cancellable.
+- Added early transcription at speech pauses and optional Silero detection with adjustable sensitivity and short overlap.
+- Gave v2.1 its own Whisper model cache with a lock shared across app processes.
+- Preserved meeting content when changing settings and drained captured audio before switching views.
+- Fixed Groq language detection and Windows setup messages for failed driver and shortcut installation.
+
 ## 2.0.3 — Quality Update — 2026-11-08
 
 - Added **Cancel finishing** and a 60-second inactivity timeout for final audio

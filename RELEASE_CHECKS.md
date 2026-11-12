@@ -1,5 +1,22 @@
 # Release validation
 
+## v2.1.0
+
+All 154 local Windows tests passed with native test-window capture and offline
+math rendering enabled. The Settings regression test switches views during
+listening and verifies that the last audio fragment, transcript, pinned answer,
+notes, and draft are available when the workspace reopens. The Groq regression
+test verifies that automatic language detection omits the optional language field.
+
+The packaged Windows launcher also transcribed quiet synthetic speech offline
+with the real Whisper tiny model. The mixed-version check ran Local Whisper from
+v2.0.3 and v2.1 with the same configured Hugging Face cache root. Each version
+continued decoding after the other deleted its own model copy, and a second
+v2.1 process was blocked from deleting an active model.
+
+The audio checks used synthetic inputs and clips. Live Zoom, Teams, and Meet
+sessions still need field validation.
+
 ## v2.0.3 Quality Update
 
 Local Windows validation passed 140 tests across the main suite with native
